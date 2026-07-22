@@ -1,10 +1,11 @@
+import titleKeyArt from "./assets/title-keyart-pixel-v3.png";
 import "./style.css";
 
 const VIEW_WIDTH = 384;
 const VIEW_HEIGHT = 216;
 const TILE = 16;
-const MAP_WIDTH = 56;
-const MAP_HEIGHT = 42;
+const MAP_WIDTH = 84;
+const MAP_HEIGHT = 63;
 const WORLD_WIDTH = MAP_WIDTH * TILE;
 const WORLD_HEIGHT = MAP_HEIGHT * TILE;
 
@@ -38,6 +39,9 @@ type Player = {
   dashUntil: number;
   dashVelocityX: number;
   dashVelocityY: number;
+  health: number;
+  ammo: number;
+  shotReadyAt: number;
 };
 
 type Spinner = { x: number; y: number; radius: number; angle: number; speed: number };
@@ -45,63 +49,120 @@ type Pit = { x: number; y: number; width: number; height: number; active: boolea
 type AimState = { screenX: number; screenY: number; worldX: number; worldY: number; visible: boolean; pulseUntil: number; pulseX: number; pulseY: number };
 type GameMode = "track" | "practice";
 type SkillId = "push" | "dash" | "run" | "grab" | "clone" | "slow" | "sleep";
-type TestBot = { id: number; x: number; y: number; direction: Direction; walking: number; color: string; name: string; moveX: number; moveY: number; nextTurnAt: number; knockbackX: number; knockbackY: number; slowUntil: number; sleepUntil: number };
+type TestBot = { id: number; x: number; y: number; direction: Direction; walking: number; color: string; name: string; skill: SkillId; moveX: number; moveY: number; nextTurnAt: number; knockbackX: number; knockbackY: number; slowUntil: number; sleepUntil: number; health: number; lap: number; checkpoint: number; routeIndex: number; shotReadyAt: number };
 type Clone = { x: number; y: number; direction: Direction; until: number };
-type Projectile = { kind: "slow" | "sleep"; x: number; y: number; velocityX: number; velocityY: number; until: number; radius: number };
+type Projectile = { kind: "slow" | "sleep" | "bullet"; owner: "player" | "bot"; sourceId?: number; x: number; y: number; velocityX: number; velocityY: number; until: number; radius: number };
+type RoomConfig = { lapLimit: number; playerCount: number; enabledSkills: SkillId[] };
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("앱을 찾을 수 없어요.");
 
 app.innerHTML = `
   <div class="pixel-shell">
-    <header class="pixel-topbar">
-      <a class="brand" href="#top" aria-label="픽셀 패닉 런 대기실"><span class="brand-icon">!</span><span>PIXEL<br />PANIC RUN</span></a>
-      <div class="build-stamp">LOCAL BUILD 0.1<br /><span>TOP-DOWN PROTOTYPE</span></div>
-    </header>
-
-    <main id="lobby-screen" class="lobby-screen" aria-labelledby="game-title">
-      <section class="hero-copy">
-        <div class="eyebrow">WAITING ROOM / 01</div>
-        <h1 id="game-title">픽셀 패닉<br /><em>마라톤</em></h1>
-        <p>누가 먼저 도착하는지는 아직 중요하지 않아요.<br />우선은 운동장 트랙을 한 바퀴 돌며, 이 게임의 <b>손맛</b>부터 확인해 봅시다.</p>
-        <div class="feature-tags"><span>TOP-DOWN 2D</span><span>PIXEL INDIE</span><span>WASD MOVE</span></div>
-        <div class="pixel-panel start-panel">
-          <label for="runner-name">러너 이름</label>
-          <div class="entry-row"><input id="runner-name" maxlength="10" value="말썽꾸러기" autocomplete="nickname" /><button id="enter-town">트랙 입장</button></div>
-          <p class="panel-note">스킬은 아직 없습니다. 장애물 운동장을 한 바퀴 도는 첫 단계예요.</p>
+    <main id="title-screen" class="title-screen" aria-labelledby="title-logo">
+      <div class="title-stage">
+        <img class="title-keyart" src="${titleKeyArt}" alt="총을 든 러너와 복제 러너들이 운동장을 질주하는 픽셀 키비주얼" />
+        <canvas id="title-canvas" width="384" height="216" aria-hidden="true"></canvas>
+        <div class="scanlines" aria-hidden="true"></div>
+        <div class="title-logo">
+          <h1 id="title-logo" aria-label="패닉 마라톤"><span class="title-word title-word-panic"><i style="--wave-delay: 0">패</i><i style="--wave-delay: 1">닉</i></span><span class="title-word title-word-marathon"><i style="--wave-delay: 2">마</i><i style="--wave-delay: 3">라</i><i style="--wave-delay: 4">톤</i></span></h1>
+          <b>달리고 · 쏘고 · 서로 끌어내려라</b>
         </div>
-      </section>
+        <div class="title-actions" aria-label="게임 시작 메뉴">
+          <button id="open-join" class="title-action primary"><span>01</span> 방 참여하기</button>
+          <button id="open-create" class="title-action"><span>02</span> 방 생성하기</button>
+        </div>
+        <section id="title-room-panel" class="title-room-panel hidden" aria-label="방 설정">
+          <div class="title-panel-heading"><span id="title-panel-marker">ROOM MENU</span><b id="title-panel-title">방 참여하기</b></div>
+          <div class="title-join-fields">
+            <label for="title-room-code">방 번호</label>
+            <input id="title-room-code" maxlength="12" placeholder="예: PM-7F2A" autocomplete="off" />
+            <p>초대 받은 방 번호를 입력하세요.</p>
+          </div>
+          <div class="title-create-fields">
+            <label for="title-runner-name">러너 이름</label>
+            <input id="title-runner-name" maxlength="10" value="말썽꾸러기" autocomplete="nickname" />
+            <div class="title-config-grid"><label for="title-lap-count">목표 랩 <input id="title-lap-count" type="number" min="1" max="999" step="1" value="5" /></label><label for="title-player-count">인원 <input id="title-player-count" type="number" min="2" max="6" step="1" value="4" /></label></div>
+            <label for="title-invite-code">초대 코드</label>
+            <input id="title-invite-code" maxlength="12" value="PM-7F2A" autocomplete="off" />
+            <span class="title-skill-label">사용 스킬 <b>최소 3개</b></span>
+            <div id="title-skill-pool" class="title-skill-options">
+              <label><input type="checkbox" value="push" checked /> 밀치기</label><label><input type="checkbox" value="dash" checked /> 돌진</label><label><input type="checkbox" value="run" checked /> 질주</label><label><input type="checkbox" value="grab" checked /> 그랩</label><label><input type="checkbox" value="clone" checked /> 분신</label><label><input type="checkbox" value="slow" checked /> 슬로우탄</label><label><input type="checkbox" value="sleep" checked /> 수면총</label>
+            </div>
+          </div>
+          <div class="title-panel-actions"><button id="title-confirm-room" class="title-panel-confirm" type="button">방 참여</button><button id="title-panel-back" class="title-panel-back" type="button">뒤로</button></div>
+        </section>
+        <div class="title-caption">2–6 PLAYERS · RANDOM SKILLS · TOTAL MAYHEM</div>
+      </div>
+    </main>
 
-      <section class="lobby-card" aria-label="픽셀 대기실 미리보기">
-        <div class="card-top"><span class="window-dot red"></span><span class="window-dot yellow"></span><span class="window-dot green"></span><span>LOBBY // TROUBLE TOWN</span></div>
-        <canvas id="lobby-canvas" width="384" height="216" aria-label="픽셀 대기실"></canvas>
-        <div class="card-bottom"><span><i class="tiny-person pink"></i> 1 / 4 READY</span><span class="blink">● LOCAL</span></div>
-      </section>
+    <main id="lobby-screen" class="lobby-screen hidden" aria-labelledby="game-title">
+      <div class="lobby-stage">
+        <canvas id="lobby-canvas" width="384" height="216" aria-label="픽셀 대기실 배경"></canvas>
+        <div class="scanlines" aria-hidden="true"></div>
+        <header class="lobby-topbar">
+          <a class="brand" href="#top" aria-label="픽셀 패닉 런 대기실"><span class="brand-icon">!</span><span>PIXEL<br />PANIC RUN</span></a>
+          <div class="lobby-mode">ONLINE LOBBY <span class="blink">● LOCAL TEST</span></div>
+        </header>
+
+        <section class="lobby-window room-browser" aria-label="방 목록">
+          <div class="window-title"><span class="window-dot green"></span><span>OPEN ROOMS</span><b>1 FOUND</b></div>
+          <h1 id="game-title">픽셀 패닉 <em>마라톤</em></h1>
+          <p class="lobby-copy">방을 골라 난입하거나, 규칙을 정해 직접 말썽판을 여세요.</p>
+          <div class="room-row">
+            <span class="room-status blink">●</span>
+            <div><b>말썽 운동장 공개방</b><small>5 LAP · 4 / 6 · ALL SKILLS</small></div>
+            <button id="join-local-room" class="join-button">참여하기</button>
+          </div>
+          <p class="room-hint">현재는 로컬 봇 레이스로 방 흐름을 검증합니다.</p>
+        </section>
+
+        <section class="pixel-panel start-panel" aria-label="방 만들기 설정">
+          <div class="window-title"><span class="window-dot yellow"></span><span>CREATE ROOM</span><b>HOST</b></div>
+          <label for="runner-name">러너 이름</label>
+          <div class="entry-row"><input id="runner-name" maxlength="10" value="말썽꾸러기" autocomplete="nickname" /><button id="enter-town">방 만들기</button></div>
+          <div class="room-settings" aria-label="방 설정">
+            <label for="lap-count">목표 랩 <b>1~999</b></label>
+            <div class="setting-grid"><input id="lap-count" type="number" min="1" max="999" step="1" value="5" /><label for="player-count">인원</label><input id="player-count" type="number" min="2" max="6" step="1" value="4" /></div>
+            <span class="setting-title">사용 스킬 (최소 3개)</span>
+            <div id="skill-pool" class="skill-options">
+              <label><input type="checkbox" value="push" checked /> 밀치기</label><label><input type="checkbox" value="dash" checked /> 돌진</label><label><input type="checkbox" value="run" checked /> 질주</label><label><input type="checkbox" value="grab" checked /> 그랩</label><label><input type="checkbox" value="clone" checked /> 분신</label><label><input type="checkbox" value="slow" checked /> 슬로우탄</label><label><input type="checkbox" value="sleep" checked /> 수면총</label>
+            </div>
+          </div>
+          <p class="panel-note">기본 5랩 · 좌클릭 총 3발 · 우클릭 랜덤 스킬 1개</p>
+        </section>
+
+        <footer class="lobby-footer"><span>WASD · MOUSE · SOCIAL SABOTAGE</span><span>BUILD 0.2 / LOCAL</span></footer>
+      </div>
     </main>
 
     <main id="game-screen" class="game-screen hidden">
-      <div class="game-wrap">
-        <div class="game-frame">
+      <div class="game-stage">
+        <div id="game-frame" class="game-frame">
           <canvas id="game-canvas" width="384" height="216" tabindex="0" aria-label="탑다운 픽셀 운동장"></canvas>
+          <div id="world-label-layer" class="world-label-layer" aria-hidden="true">
+            <span id="player-skill-label" class="world-label player-skill-label hidden"></span>
+          </div>
           <div class="scanlines" aria-hidden="true"></div>
+          <button id="fullscreen-button" class="frame-button" type="button">전체 화면</button>
+          <div id="race-board" class="race-board" aria-label="레이스 현황"></div>
           <div class="game-hud">
-            <div class="hud-box"><span>AREA</span><strong id="area-value">말썽 운동장</strong></div>
             <div class="hud-box middle"><span>LAP</span><strong id="lap-value">0 / 1 LAP</strong></div>
             <div class="hud-box right"><span>OBJECTIVE</span><strong id="objective-value">CHECKPOINT 1</strong></div>
           </div>
-          <div class="message-box"><span class="key">WASD</span>로 달리고, <span class="key">MOUSE</span>로 스킬 방향을 조준하세요. <span class="key">L-CLICK</span>은 조준 펄스를 발사합니다.</div>
+          <div class="message-box"><span class="key">WASD</span> 이동 · <span class="key">L-CLICK</span> 총 · <span class="key">R-CLICK</span> 현재 스킬 · 체크포인트에서 탄창과 스킬을 갱신합니다.</div>
           <div id="skill-bar" class="skill-bar" aria-label="스킬 단축키"></div>
+          <aside class="side-panel">
+            <div class="pixel-panel">
+              <div class="eyebrow">PLAYER</div>
+              <div id="player-name-tag" class="player-name-tag">말썽꾸러기</div>
+              <p>라이프 5칸과 총알 3발로 달립니다. 구덩이 또는 체크포인트 복귀 시 탄창이 회복되고, 체크포인트마다 스킬도 바뀝니다.</p>
+            </div>
+            <div class="pixel-panel controls-panel"><span>MOVE</span><b>W A S D</b><span>GUN</span><b>L-CLICK</b><span>SKILL</span><b>R-CLICK</b><span>MENU</span><b>ESC</b></div>
+            <button id="practice-button" class="ghost-button">스킬 연습장 이동</button>
+            <button id="back-to-lobby" class="ghost-button">로비로 돌아가기</button>
+          </aside>
         </div>
-        <aside class="side-panel">
-          <div class="pixel-panel">
-            <div class="eyebrow">PLAYER</div>
-            <div id="player-name-tag" class="player-name-tag">말썽꾸러기</div>
-            <p>회전봉은 밀어내고, 활성화된 구덩이는 되돌립니다. 마우스를 움직여 이후 추가할 스킬의 발사 방향도 미리 조준할 수 있어요.</p>
-          </div>
-          <div class="pixel-panel controls-panel"><span>MOVE</span><b>W A S D</b><span>AIM</span><b>MOUSE / CLICK</b><span>MENU</span><b>ESC</b></div>
-          <button id="practice-button" class="ghost-button">스킬 연습장 이동</button>
-          <button id="back-to-lobby" class="ghost-button">대기실로 돌아가기</button>
-        </aside>
       </div>
     </main>
 
@@ -116,19 +177,43 @@ function getElement<T extends HTMLElement>(selector: string) {
 }
 
 const elements = {
+  title: getElement<HTMLElement>("#title-screen"),
   lobby: getElement<HTMLElement>("#lobby-screen"),
   game: getElement<HTMLElement>("#game-screen"),
+  titleCanvas: getElement<HTMLCanvasElement>("#title-canvas"),
+  openJoin: getElement<HTMLButtonElement>("#open-join"),
+  openCreate: getElement<HTMLButtonElement>("#open-create"),
+  titleStage: getElement<HTMLElement>(".title-stage"),
+  titleRoomPanel: getElement<HTMLElement>("#title-room-panel"),
+  titlePanelMarker: getElement<HTMLElement>("#title-panel-marker"),
+  titlePanelTitle: getElement<HTMLElement>("#title-panel-title"),
+  titleRoomCode: getElement<HTMLInputElement>("#title-room-code"),
+  titleRunnerName: getElement<HTMLInputElement>("#title-runner-name"),
+  titleLapCount: getElement<HTMLInputElement>("#title-lap-count"),
+  titlePlayerCount: getElement<HTMLInputElement>("#title-player-count"),
+  titleInviteCode: getElement<HTMLInputElement>("#title-invite-code"),
+  titleSkillPool: getElement<HTMLElement>("#title-skill-pool"),
+  titleConfirm: getElement<HTMLButtonElement>("#title-confirm-room"),
+  titlePanelBack: getElement<HTMLButtonElement>("#title-panel-back"),
   name: getElement<HTMLInputElement>("#runner-name"),
   enter: getElement<HTMLButtonElement>("#enter-town"),
+  join: getElement<HTMLButtonElement>("#join-local-room"),
   back: getElement<HTMLButtonElement>("#back-to-lobby"),
   lobbyCanvas: getElement<HTMLCanvasElement>("#lobby-canvas"),
   gameCanvas: getElement<HTMLCanvasElement>("#game-canvas"),
+  gameFrame: getElement<HTMLElement>("#game-frame"),
+  worldLabelLayer: getElement<HTMLElement>("#world-label-layer"),
+  playerSkillLabel: getElement<HTMLElement>("#player-skill-label"),
+  fullscreen: getElement<HTMLButtonElement>("#fullscreen-button"),
   playerName: getElement<HTMLElement>("#player-name-tag"),
-  area: getElement<HTMLElement>("#area-value"),
+  raceBoard: getElement<HTMLElement>("#race-board"),
   lap: getElement<HTMLElement>("#lap-value"),
   objective: getElement<HTMLElement>("#objective-value"),
   skillBar: getElement<HTMLElement>("#skill-bar"),
   practice: getElement<HTMLButtonElement>("#practice-button"),
+  lapCount: getElement<HTMLInputElement>("#lap-count"),
+  playerCount: getElement<HTMLInputElement>("#player-count"),
+  skillPool: getElement<HTMLElement>("#skill-pool"),
   toast: getElement<HTMLElement>("#toast"),
 };
 
@@ -138,12 +223,22 @@ function getPixelContext(canvas: HTMLCanvasElement) {
   return context;
 }
 
+const titleContext = getPixelContext(elements.titleCanvas);
 const lobbyContext = getPixelContext(elements.lobbyCanvas);
 const gameContext = getPixelContext(elements.gameCanvas);
+titleContext.imageSmoothingEnabled = false;
 lobbyContext.imageSmoothingEnabled = false;
 gameContext.imageSmoothingEnabled = false;
 
-const TRACK = { outerLeft: 32, outerTop: 32, outerRight: 864, outerBottom: 640, innerLeft: 208, innerTop: 192, innerRight: 688, innerBottom: 480 };
+// 기존 트랙보다 직선 구간을 50% 늘려, 한 바퀴 주행 거리를 약 1.5배로 확장한다.
+const TRACK = { outerLeft: 32, outerTop: 32, outerRight: 1280, outerBottom: 944, innerLeft: 208, innerTop: 192, innerRight: 1104, innerBottom: 784 };
+const START_POINT = { x: 128, y: 856 };
+const RESPAWN_POINTS = [
+  START_POINT,
+  { x: 1152, y: 856 },
+  { x: 1152, y: 120 },
+  { x: 128, y: 120 },
+];
 const props: WorldProp[] = [
   { kind: "bench", x: -10, y: 103, width: 39, height: 16, solid: true },
   { kind: "vending", x: 2, y: 157, width: 28, height: 36, solid: true },
@@ -152,35 +247,37 @@ const props: WorldProp[] = [
   { kind: "table", x: 294, y: 274, width: 42, height: 28, solid: true },
   { kind: "sofa", x: 426, y: 273, width: 47, height: 25, solid: true },
   { kind: "plant", x: 360, y: 220, width: 20, height: 24, solid: true },
-  { kind: "mailbox", x: 870, y: 111, width: 23, height: 30, solid: true },
-  { kind: "vending", x: 866, y: 222, width: 28, height: 36, solid: true },
-  { kind: "bench", x: 870, y: 368, width: 39, height: 16, solid: true },
-  { kind: "plant", x: 872, y: 542, width: 20, height: 24, solid: true },
+  { kind: "mailbox", x: 1286, y: 111, width: 23, height: 30, solid: true },
+  { kind: "vending", x: 1282, y: 318, width: 28, height: 36, solid: true },
+  { kind: "bench", x: 1286, y: 544, width: 39, height: 16, solid: true },
+  { kind: "plant", x: 1288, y: 846, width: 20, height: 24, solid: true },
   { kind: "lamp", x: 144, y: 2, width: 16, height: 30 },
   { kind: "lamp", x: 660, y: 2, width: 16, height: 30 },
-  { kind: "lamp", x: 144, y: 640, width: 16, height: 30 },
-  { kind: "lamp", x: 660, y: 640, width: 16, height: 30 },
+  { kind: "lamp", x: 144, y: 944, width: 16, height: 30 },
+  { kind: "lamp", x: 1068, y: 944, width: 16, height: 30 },
 ];
 const spinners: Spinner[] = [
-  { x: 450, y: 552, radius: 52, angle: 0, speed: 2.15 },
-  { x: 780, y: 340, radius: 48, angle: Math.PI * .5, speed: -2.8 },
-  { x: 440, y: 112, radius: 48, angle: Math.PI * .2, speed: 3.1 },
+  { x: 650, y: 856, radius: 52, angle: 0, speed: 2.15 },
+  { x: 1190, y: 492, radius: 48, angle: Math.PI * .5, speed: -2.8 },
+  { x: 660, y: 112, radius: 48, angle: Math.PI * .2, speed: 3.1 },
 ];
 const pits: Pit[] = [
-  { x: 290, y: 532, width: 34, height: 36, active: false },
-  { x: 720, y: 250, width: 34, height: 31, active: false },
-  { x: 115, y: 280, width: 34, height: 31, active: false },
-  { x: 540, y: 88, width: 34, height: 34, active: false },
+  { x: 385, y: 836, width: 34, height: 36, active: false },
+  { x: 1168, y: 350, width: 34, height: 31, active: false },
+  { x: 115, y: 510, width: 34, height: 31, active: false },
+  { x: 840, y: 88, width: 34, height: 34, active: false },
 ];
-const jumpPads = [{ x: 560, y: 532, width: 40, height: 30, pushX: -320, pushY: 0 }];
+const jumpPads = [{ x: 920, y: 836, width: 40, height: 30, pushX: -320, pushY: 0 }];
 const checkpoints = [
-  { x: 720, y: 512, width: 72, height: 74, spawnX: 744, spawnY: 552 },
-  { x: 720, y: 80, width: 72, height: 74, spawnX: 790, spawnY: 120 },
+  { x: 1120, y: 816, width: 72, height: 74, spawnX: 1152, spawnY: 856 },
+  { x: 1120, y: 80, width: 72, height: 74, spawnX: 1152, spawnY: 120 },
   { x: 105, y: 80, width: 72, height: 74, spawnX: 128, spawnY: 120 },
 ];
-const player: Player = { x: 128, y: 552, direction: "right", walking: 0, name: "말썽꾸러기", knockbackX: 0, knockbackY: 0, hitUntil: 0, fallingUntil: 0, fallingStartedAt: 0, fallTargetX: 0, fallTargetY: 0, airUntil: 0, airStartedAt: 0, dashUntil: 0, dashVelocityX: 0, dashVelocityY: 0 };
+const player: Player = { x: START_POINT.x, y: START_POINT.y, direction: "right", walking: 0, name: "말썽꾸러기", knockbackX: 0, knockbackY: 0, hitUntil: 0, fallingUntil: 0, fallingStartedAt: 0, fallTargetX: 0, fallTargetY: 0, airUntil: 0, airStartedAt: 0, dashUntil: 0, dashVelocityX: 0, dashVelocityY: 0, health: 5, ammo: 3, shotReadyAt: 0 };
 const PRACTICE_ARENA = { left: 180, top: 136, right: 716, bottom: 536 };
 const testBots: TestBot[] = [];
+type BotWorldLabelGroup = { container: HTMLDivElement; name: HTMLSpanElement; skill: HTMLSpanElement };
+const botWorldLabels = new Map<number, BotWorldLabelGroup>();
 const clones: Clone[] = [];
 const projectiles: Projectile[] = [];
 const skillReadyAt: Record<SkillId, number> = { push: 0, dash: 0, run: 0, grab: 0, clone: 0, slow: 0, sleep: 0 };
@@ -189,9 +286,13 @@ let dashCharges = 3;
 let dashRechargeAt = 0;
 let runUntil = 0;
 let gameMode: GameMode = "track";
+let roomConfig: RoomConfig = { lapLimit: 5, playerCount: 4, enabledSkills: ["push", "dash", "run", "grab", "clone", "slow", "sleep"] };
+let equippedSkill: SkillId = "push";
+let matchFinished = false;
 const pressedKeys = new Set<string>();
 let gameActive = false;
 let lastFrame = performance.now();
+let titleAnimationStartedAt = performance.now();
 let toastTimer: number | undefined;
 let checkpointIndex = 0;
 let lap = 0;
@@ -201,6 +302,7 @@ let jumpPadCooldownUntil = 0;
 let startArmed = false;
 const aim: AimState = { screenX: VIEW_WIDTH / 2, screenY: VIEW_HEIGHT / 2, worldX: 0, worldY: 0, visible: false, pulseUntil: 0, pulseX: 0, pulseY: 0 };
 let skillBarSignature = "";
+let raceBoardSignature = "";
 
 function noise(x: number, y: number) {
   const value = Math.sin(x * 87.3 + y * 41.7) * 1031.77;
@@ -261,24 +363,24 @@ function drawWorldFloor(context: CanvasRenderingContext2D, cameraX: number, came
 
   for (let x = TRACK.innerLeft + 8; x < TRACK.innerRight - 8; x += 22) {
     line("#f8dab1", x, 111, 11, 3);
-    line("#f8dab1", x, 559, 11, 3);
+    line("#f8dab1", x, 863, 11, 3);
   }
   for (let y = TRACK.innerTop + 10; y < TRACK.innerBottom - 8; y += 22) {
     line("#f8dab1", 119, y, 3, 11);
-    line("#f8dab1", 775, y, 3, 11);
+    line("#f8dab1", 1191, y, 3, 11);
   }
 
   for (let row = 0; row < 7; row += 1) {
-    line(row % 2 ? "#fff0d1" : "#40344f", 160, 522 + row * 11, 10, 11);
-    line(row % 2 ? "#40344f" : "#fff0d1", 170, 522 + row * 11, 10, 11);
+    line(row % 2 ? "#fff0d1" : "#40344f", 160, 826 + row * 11, 10, 11);
+    line(row % 2 ? "#40344f" : "#fff0d1", 170, 826 + row * 11, 10, 11);
   }
-  line("#dbb75d", 398, 336, 102, 3);
-  line("#dbb75d", 448, 286, 3, 102);
-  line("#7ccc73", 403, 341, 92, 42);
+  line("#dbb75d", 606, 488, 132, 3);
+  line("#dbb75d", 670, 424, 3, 132);
+  line("#7ccc73", 611, 493, 122, 54);
   for (let index = 0; index < 10; index += 1) {
-    const z = index * 63 + 24;
+    const z = index * 92 + 40;
     line("#f6d477", 26, z, 5, 5);
-    line("#f6d477", 870, z + 19, 5, 5);
+    line("#f6d477", 1286, z + 19, 5, 5);
   }
 }
 
@@ -467,10 +569,69 @@ function drawPerson(context: CanvasRenderingContext2D, x: number, y: number, dir
   fillRect(context, "#f4d9c7", x + 7, y + 3 + bounce, 2, 4);
 }
 
+function drawHealthPips(context: CanvasRenderingContext2D, left: number, y: number, health: number) {
+  for (let index = 0; index < 5; index += 1) {
+    const pipX = left + index * 5;
+    fillRect(context, "#211b35", pipX, y, 4, 4);
+    fillRect(context, index < health ? "#ef5868" : "#5a526b", pipX + 1, y + 1, 2, 2);
+  }
+}
+
+function drawAmmoPips(context: CanvasRenderingContext2D, left: number, y: number, ammo: number) {
+  for (let index = 0; index < 3; index += 1) {
+    const pipX = left + index * 6;
+    fillRect(context, "#211b35", pipX + 1, y, 2, 1);
+    fillRect(context, "#211b35", pipX, y + 1, 4, 5);
+    if (index < ammo) {
+      fillRect(context, "#f1b84f", pipX + 1, y + 1, 2, 4);
+      fillRect(context, "#fff1a6", pipX + 1, y + 1, 1, 3);
+    } else {
+      fillRect(context, "#5a526b", pipX + 1, y + 1, 2, 4);
+    }
+  }
+}
+
+function placeWorldLabel(element: HTMLElement, x: number, y: number) {
+  element.style.left = `${(x / VIEW_WIDTH) * 100}%`;
+  element.style.top = `${(y / VIEW_HEIGHT) * 100}%`;
+  element.classList.remove("hidden");
+}
+
+function updatePlayerSkillLabel(left: number, y: number) {
+  elements.playerSkillLabel.textContent = skillLabels[equippedSkill].slice(0, 5);
+  placeWorldLabel(elements.playerSkillLabel, left, y);
+}
+
+function updateBotLabels(bot: TestBot, left: number, y: number) {
+  let labels = botWorldLabels.get(bot.id);
+  if (!labels) {
+    const container = document.createElement("div");
+    const name = document.createElement("span");
+    const skill = document.createElement("span");
+    container.className = "world-label-stack";
+    name.className = "world-label bot-name-label";
+    skill.className = "world-label bot-skill-label";
+    container.append(name, skill);
+    elements.worldLabelLayer.append(container);
+    labels = { container, name, skill };
+    botWorldLabels.set(bot.id, labels);
+  }
+  labels.name.textContent = bot.name;
+  labels.skill.textContent = skillLabels[bot.skill].slice(0, 5);
+  placeWorldLabel(labels.container, left, y);
+}
+
+function resetWorldLabels() {
+  elements.playerSkillLabel.classList.add("hidden");
+  for (const labels of botWorldLabels.values()) labels.container.remove();
+  botWorldLabels.clear();
+}
+
 function drawPlayer(context: CanvasRenderingContext2D, cameraX: number, cameraY: number, time: number) {
   const baseX = player.x - cameraX;
   const baseY = player.y - cameraY;
   if (player.fallingUntil > time) {
+    elements.playerSkillLabel.classList.add("hidden");
     const progress = Math.max(0, Math.min(1, (time - player.fallingStartedAt) / 520));
     const drawX = baseX + (player.fallTargetX - player.x) * progress;
     const drawY = baseY + (player.fallTargetY - player.y) * progress;
@@ -485,8 +646,196 @@ function drawPlayer(context: CanvasRenderingContext2D, cameraX: number, cameraY:
 
   const airProgress = player.airUntil > time ? Math.max(0, Math.min(1, (time - player.airStartedAt) / 560)) : 0;
   const lift = airProgress > 0 ? Math.sin(airProgress * Math.PI) * 18 : 0;
+  const drawY = baseY - lift;
   if (lift > 0) fillRect(context, "rgba(38,31,54,.3)", baseX - 8, baseY + 10, 16, 3);
-  drawPerson(context, baseX, baseY - lift, player.direction, player.walking);
+  drawPerson(context, baseX, drawY, player.direction, player.walking);
+  const statusLeft = Math.round(baseX - 12);
+  drawHealthPips(context, statusLeft, drawY - 18, player.health);
+  drawAmmoPips(context, statusLeft, drawY - 27, player.ammo);
+  updatePlayerSkillLabel(statusLeft, drawY - 27);
+}
+
+function drawTitleCloud(context: CanvasRenderingContext2D, x: number, y: number) {
+  fillRect(context, "#d7f4e6", x, y + 5, 32, 5);
+  fillRect(context, "#d7f4e6", x + 6, y + 1, 19, 9);
+  fillRect(context, "#fffbed", x + 11, y - 3, 9, 6);
+  fillRect(context, "#b4dfdb", x + 3, y + 10, 28, 2);
+}
+
+function drawTitleCloneGate(context: CanvasRenderingContext2D, time: number) {
+  const x = 324;
+  const y = 22;
+  const flash = Math.floor(time / 130) % 2;
+  fillRect(context, "#283550", x - 3, y + 7, 48, 55);
+  fillRect(context, "#536784", x, y + 9, 42, 49);
+  fillRect(context, "#f5e8c7", x + 3, y, 35, 10);
+  fillRect(context, "#243047", x + 8, y + 3, 25, 3);
+  fillRect(context, "#f4c65c", x + 3, y + 14, 4, 4);
+  fillRect(context, "#ef7078", x + 34, y + 14, 4, 4);
+  fillRect(context, "#202d47", x + 6, y + 23, 29, 31);
+  fillRect(context, flash ? "#90eff0" : "#57c8ea", x + 9, y + 26, 23, 25);
+  fillRect(context, "#ecffe4", x + 12, y + 27, 4, 18);
+  fillRect(context, "#ecffe4", x + 23, y + 32, 5, 16);
+  fillRect(context, "#ecffe4", x + 16, y + 37, 10, 4);
+  fillRect(context, "#2c3851", x + 42, y + 27, 7, 30);
+  fillRect(context, "#f4c65c", x + 44, y + 34, 3, 4);
+  fillRect(context, "#ef7078", x + 44, y + 45, 3, 4);
+}
+
+type TitleRunnerKind = "captain" | "grappler" | "sleeper" | "dasher" | "clone";
+
+function drawTitleRunner(context: CanvasRenderingContext2D, x: number, y: number, scale: number, phase: number, kind: TitleRunnerKind, alpha = 1) {
+  const bounce = Math.abs(Math.sin(phase)) > .56 ? 1 : 0;
+  const strideForward = Math.sin(phase) > 0;
+  const leftStep = strideForward ? 3 : 0;
+  const rightStep = strideForward ? 0 : 3;
+  const armSwing = strideForward ? 3 : -1;
+  const palette = {
+    captain: { suit: "#ef6e75", trim: "#ffd160", hair: "#463650", accent: "#f8a06f" },
+    grappler: { suit: "#6aac70", trim: "#c6ef89", hair: "#2f4a45", accent: "#f2d5bf" },
+    sleeper: { suit: "#9a7bd3", trim: "#efc5ff", hair: "#4a385f", accent: "#efc3dc" },
+    dasher: { suit: "#4b96cd", trim: "#a8e9f1", hair: "#303d62", accent: "#f2d5bf" },
+    clone: { suit: "#8b72cc", trim: "#d7c7ff", hair: "#4b3d66", accent: "#dfc6ea" },
+  }[kind];
+  context.save();
+  context.globalAlpha = alpha;
+  context.translate(Math.round(x), Math.round(y));
+  context.scale(scale, scale);
+  fillRect(context, "rgba(31,38,61,.3)", -8, 15, 17, 3);
+  fillRect(context, "#273047", -7, 10 + leftStep, 5, 7);
+  fillRect(context, "#273047", 3, 10 + rightStep, 5, 7);
+  fillRect(context, "#f7f0d6", -8, 16 + leftStep, 7, 2);
+  fillRect(context, "#f7f0d6", 3, 16 + rightStep, 7, 2);
+  fillRect(context, "#273047", -7, -2 + bounce, 15, 15);
+  fillRect(context, "#273047", -9, 1 + bounce, 19, 8);
+  fillRect(context, palette.suit, -6, -1 + bounce, 13, 13);
+  fillRect(context, palette.suit, -8, 2 + bounce, 17, 6);
+  fillRect(context, palette.trim, -5, 4 + bounce, 11, 2);
+  fillRect(context, "#ffffff", -1, 0 + bounce, 3, 10);
+  fillRect(context, palette.trim, -6, 10 + bounce, 13, 2);
+  fillRect(context, "#273047", -12, 2 + bounce + armSwing, 4, 8);
+  fillRect(context, "#273047", 9, 2 + bounce - armSwing, 4, 8);
+  fillRect(context, palette.suit, -11, 3 + bounce + armSwing, 3, 6);
+  fillRect(context, palette.suit, 9, 3 + bounce - armSwing, 3, 6);
+  fillRect(context, "#f2d5bf", -12, 8 + bounce + armSwing, 4, 3);
+  fillRect(context, "#f2d5bf", 9, 8 + bounce - armSwing, 4, 3);
+  fillRect(context, "#273047", -5, -17 + bounce, 11, 3);
+  fillRect(context, "#273047", -7, -14 + bounce, 15, 14);
+  fillRect(context, palette.accent, -5, -13 + bounce, 11, 12);
+  fillRect(context, palette.accent, -6, -10 + bounce, 13, 8);
+  fillRect(context, palette.hair, -5, -17 + bounce, 11, 4);
+  fillRect(context, palette.hair, -7, -14 + bounce, 15, 3);
+  fillRect(context, "#273047", -4, -8 + bounce, 3, 4);
+  fillRect(context, "#ffffff", -3, -8 + bounce, 1, 1);
+  fillRect(context, "#273047", 3, -8 + bounce, 3, 4);
+  fillRect(context, "#ffffff", 4, -8 + bounce, 1, 1);
+  fillRect(context, "#273047", -2, -2 + bounce, 5, 3);
+  fillRect(context, "#ef7279", -1, -2 + bounce, 3, 1);
+  if (kind === "captain") {
+    fillRect(context, "#ffd160", -9, -14 + bounce, 19, 3);
+    fillRect(context, "#ef6e75", 7, -17 + bounce, 6, 4);
+    fillRect(context, "#273047", 10, -1 + bounce - armSwing, 12, 5);
+    fillRect(context, "#9cb6c2", 12, bounce - armSwing, 9, 2);
+    fillRect(context, "#f7d86f", 22, 1 + bounce - armSwing, 4, 2);
+  }
+  if (kind === "grappler") {
+    fillRect(context, "#c6ef89", -8, -15 + bounce, 17, 3);
+    fillRect(context, "#607b86", 10, 1 + bounce - armSwing, 8, 7);
+    fillRect(context, "#ef6e75", 17, bounce - armSwing, 6, 9);
+    fillRect(context, "#f2d5bf", 22, 1 + bounce - armSwing, 6, 7);
+  }
+  if (kind === "sleeper") {
+    fillRect(context, "#efc5ff", -7, -13 + bounce, 15, 2);
+    fillRect(context, "#39455d", -16, 4 + bounce + armSwing, 8, 5);
+    fillRect(context, "#d899e8", -19, 5 + bounce + armSwing, 4, 3);
+    fillRect(context, "#fff1a9", -21, 6 + bounce + armSwing, 2, 1);
+  }
+  if (kind === "dasher") {
+    fillRect(context, "#a8e9f1", -8, -15 + bounce, 17, 3);
+    fillRect(context, "#f3d66e", -10, -17 + bounce, 5, 3);
+    fillRect(context, "#f3d66e", 7, -17 + bounce, 5, 3);
+  }
+  if (kind === "clone") {
+    fillRect(context, "#d7c7ff", -6, -14 + bounce, 12, 2);
+    fillRect(context, "#e5d7ff", -4, -7 + bounce, 3, 2);
+    fillRect(context, "#e5d7ff", 3, -7 + bounce, 3, 2);
+  }
+  context.restore();
+}
+
+function drawTitlePreview(time: number) {
+  const elapsed = time - titleAnimationStartedAt;
+  const beat = elapsed / 1000;
+  const walk = beat * 10;
+  const fireLoop = (elapsed % 980) / 980;
+  titleContext.clearRect(0, 0, VIEW_WIDTH, VIEW_HEIGHT);
+
+  fillRect(titleContext, "#69c9df", 0, 0, VIEW_WIDTH, 92);
+  fillRect(titleContext, "#4b9b64", 0, 78, VIEW_WIDTH, 138);
+  drawTitleCloud(titleContext, 42, 18);
+  drawTitleCloud(titleContext, 176, 9);
+  drawTitleCloud(titleContext, 260, 35);
+  for (let index = 0; index < 18; index += 1) {
+    const sparkleX = (index * 31) % VIEW_WIDTH;
+    const sparkleY = 7 + (index * 19) % 82;
+    fillRect(titleContext, index % 3 === 0 ? "#fff0a7" : "#d9fbf1", sparkleX, sparkleY, 2, 2);
+  }
+
+  fillRect(titleContext, "#566b7e", 75, 42, 211, 45);
+  for (let row = 0; row < 5; row += 1) {
+    fillRect(titleContext, row % 2 ? "#92a3aa" : "#bbc6bd", 77, 45 + row * 8, 204 - row * 7, 4);
+    for (let seat = 0; seat < 14 - row; seat += 1) {
+      const seatX = 84 + seat * 13 + row * 3;
+      fillRect(titleContext, seat % 3 === 0 ? "#ef737b" : seat % 3 === 1 ? "#f3d06d" : "#5e9fcb", seatX, 48 + row * 8, 4, 3);
+    }
+  }
+  for (let y = 90; y < VIEW_HEIGHT; y += 11) fillRect(titleContext, y % 22 ? "#63ac67" : "#75ba70", 0, y, VIEW_WIDTH, 2);
+
+  for (let y = 82; y < VIEW_HEIGHT; y += 1) {
+    const progress = (y - 82) / 134;
+    const left = Math.round(168 - progress * 220);
+    const width = Math.round(114 + progress * 336);
+    fillRect(titleContext, "#dd695d", left, y, width, 1);
+    for (let lane = 1; lane < 4; lane += 1) {
+      const laneX = Math.round(left + width * lane / 4);
+      fillRect(titleContext, "#ffe9bd", laneX, y, progress > .42 ? 2 : 1, 1);
+    }
+  }
+  fillRect(titleContext, "#ffe7ba", 54, 184, 272, 3);
+  fillRect(titleContext, "#ffe7ba", 54, 191, 272, 2);
+
+  drawTitleCloneGate(titleContext, elapsed);
+  for (let index = 0; index < 12; index += 1) {
+    const loop = (beat * .21 + index * .11) % 1;
+    const row = index % 4;
+    const x = 337 - loop * 74 + row * 6;
+    const y = 67 + row * 9 + loop * 26;
+    drawTitleRunner(titleContext, x, y, .52 + loop * .15, walk + index, "clone", .46 + loop * .3);
+  }
+
+  const heroX = 209 + Math.sin(beat * 2.2) * 2;
+  const heroY = 157 + Math.abs(Math.sin(walk)) * 2;
+  drawTitleRunner(titleContext, 143, 161 + Math.abs(Math.sin(walk + 1.4)), 2.05, walk + 1.4, "sleeper");
+  drawTitleRunner(titleContext, 297, 161 + Math.abs(Math.sin(walk + .8)), 2.15, walk + .8, "grappler");
+  drawTitleRunner(titleContext, 350, 151 + Math.abs(Math.sin(walk + 2.4)), 1.72, walk + 2.4, "dasher");
+  drawTitleRunner(titleContext, heroX, heroY, 3.15, walk, "captain");
+
+  const bulletX = 171 + fireLoop * 66;
+  if (fireLoop < .74) {
+    fillRect(titleContext, "#fff0a7", bulletX, 155, 7, 4);
+    fillRect(titleContext, "#f07862", bulletX + 2, 156, 3, 2);
+    for (let trail = 0; trail < 3; trail += 1) fillRect(titleContext, "#ffd97a", bulletX - 7 - trail * 6, 156, 3, 2);
+  }
+  if (fireLoop > .8) {
+    fillRect(titleContext, "#fff0a7", 162, 151, 8, 8);
+    fillRect(titleContext, "#ef737b", 164, 149, 4, 12);
+  }
+
+  for (let index = 0; index < 15; index += 1) {
+    const confettiX = (index * 47 + Math.floor(beat * (9 + index % 3))) % VIEW_WIDTH;
+    const confettiY = 101 + (index * 29 + Math.floor(beat * (13 + index % 4))) % 105;
+    fillRect(titleContext, index % 3 === 0 ? "#f5d765" : index % 3 === 1 ? "#79e0c1" : "#e87b9a", confettiX, confettiY, 2, 2);
+  }
 }
 
 type Rect = { x: number; y: number; width: number; height: number };
@@ -506,7 +855,8 @@ function canStandAt(x: number, y: number) {
     [x - 4, y - 3], [x + 4, y - 3], [x - 4, y + 6], [x + 4, y + 6],
   ];
   if (!feet.every(([footX, footY]) => isTrackPoint(footX, footY))) return false;
-  return !props.some((prop) => prop.solid && intersects(playerLeft, playerTop, 10, 12, prop));
+  return !props.some((prop) => prop.solid && intersects(playerLeft, playerTop, 10, 12, prop))
+    && !clones.some((clone) => Math.abs(x - clone.x) < 11 && Math.abs(y - clone.y) < 12);
 }
 
 function movePlayer(dx: number, dy: number) {
@@ -546,7 +896,7 @@ function getPracticeTargetInAim(maxDistance: number, minimumDot = .55) {
 
 function canUseSkill(id: SkillId, now: number) {
   if (id === "dash") return dashCharges > 0 && now >= skillReadyAt.dash;
-  if (id === "clone") return clones.length < 5 && now >= skillReadyAt.clone;
+  if (id === "clone") return clones.length < 20 && now >= skillReadyAt.clone;
   return now >= skillReadyAt[id];
 }
 
@@ -561,10 +911,6 @@ function applySlow(centerX: number, centerY: number, radius: number, now: number
 }
 
 function useSkill(id: SkillId, now = performance.now()) {
-  if (gameMode !== "practice") {
-    showToast("스킬은 연습장에서 테스트할 수 있다.");
-    return false;
-  }
   if (!canUseSkill(id, now) || player.fallingUntil > now) return false;
   const aimVector = getAimVector();
 
@@ -606,8 +952,15 @@ function useSkill(id: SkillId, now = performance.now()) {
     skillReadyAt.grab = now + 3800;
     const target = getPracticeTargetInAim(180);
     if (target) {
-      target.x = Math.max(PRACTICE_ARENA.left + 12, Math.min(PRACTICE_ARENA.right - 12, player.x + aimVector.x * 34));
-      target.y = Math.max(PRACTICE_ARENA.top + 12, Math.min(PRACTICE_ARENA.bottom - 12, player.y + aimVector.y * 34));
+      const pullX = player.x + aimVector.x * 34;
+      const pullY = player.y + aimVector.y * 34;
+      if (gameMode === "practice") {
+        target.x = Math.max(PRACTICE_ARENA.left + 12, Math.min(PRACTICE_ARENA.right - 12, pullX));
+        target.y = Math.max(PRACTICE_ARENA.top + 12, Math.min(PRACTICE_ARENA.bottom - 12, pullY));
+      } else if (isTrackPoint(pullX, pullY)) {
+        target.x = pullX;
+        target.y = pullY;
+      }
       target.knockbackX = 0;
       target.knockbackY = 0;
       showToast(`${target.name}을(를) 앞으로 끌어왔다!`);
@@ -617,22 +970,40 @@ function useSkill(id: SkillId, now = performance.now()) {
   }
 
   if (id === "clone") {
+    const rawX = player.x + aimVector.x * 32;
+    const rawY = player.y + aimVector.y * 32;
+    let spawnX = gameMode === "practice" ? Math.max(PRACTICE_ARENA.left + 12, Math.min(PRACTICE_ARENA.right - 12, rawX)) : rawX;
+    let spawnY = gameMode === "practice" ? Math.max(PRACTICE_ARENA.top + 12, Math.min(PRACTICE_ARENA.bottom - 12, rawY)) : rawY;
+    if (gameMode === "track" && !canStandAt(spawnX, spawnY)) {
+      let found = false;
+      for (let distance = 28; distance >= 8; distance -= 4) {
+        const candidateX = player.x + aimVector.x * distance;
+        const candidateY = player.y + aimVector.y * distance;
+        if (!canStandAt(candidateX, candidateY)) continue;
+        spawnX = candidateX;
+        spawnY = candidateY;
+        found = true;
+        break;
+      }
+      if (!found) {
+        showToast("분신을 놓을 수 있는 길이 없다.");
+        return false;
+      }
+    }
     skillReadyAt.clone = now + 1100;
-    const spawnX = Math.max(PRACTICE_ARENA.left + 12, Math.min(PRACTICE_ARENA.right - 12, player.x + aimVector.x * 32));
-    const spawnY = Math.max(PRACTICE_ARENA.top + 12, Math.min(PRACTICE_ARENA.bottom - 12, player.y + aimVector.y * 32));
     clones.push({ x: spawnX, y: spawnY, direction: player.direction, until: now + 9500 });
-    showToast(`분신 배치! (${clones.length}/5)`);
+    showToast(`분신 배치! (${clones.length}/20)`);
   }
 
   if (id === "slow") {
     skillReadyAt.slow = now + 4600;
-    projectiles.push({ kind: "slow", x: player.x, y: player.y - 2, velocityX: aimVector.x * 265, velocityY: aimVector.y * 265, until: now + 760, radius: 72 });
+    projectiles.push({ kind: "slow", owner: "player", x: player.x, y: player.y - 2, velocityX: aimVector.x * 265, velocityY: aimVector.y * 265, until: now + 760, radius: 72 });
     showToast("슬로우탄 발사!");
   }
 
   if (id === "sleep") {
     skillReadyAt.sleep = now + 2000;
-    projectiles.push({ kind: "sleep", x: player.x, y: player.y - 2, velocityX: aimVector.x * 345, velocityY: aimVector.y * 345, until: now + 680, radius: 0 });
+    projectiles.push({ kind: "sleep", owner: "player", x: player.x, y: player.y - 2, velocityX: aimVector.x * 345, velocityY: aimVector.y * 345, until: now + 680, radius: 0 });
     showToast("수면총 발사!");
   }
   return true;
@@ -649,7 +1020,77 @@ function useRandomSkill(now: number) {
   showToast(`랜덤 스킬: ${skillLabels[selected]}!`);
 }
 
+function rollEquippedSkill(now: number, announce = true) {
+  const pool = roomConfig.enabledSkills;
+  equippedSkill = pool[Math.floor(Math.random() * pool.length)] ?? "push";
+  skillReadyAt[equippedSkill] = now;
+  if (announce) showToast(`새 스킬: ${skillLabels[equippedSkill]}! 우클릭으로 사용하세요.`);
+}
+
+function refillPlayerAmmo() {
+  player.ammo = 3;
+}
+
+function fireBasicShot(now: number) {
+  if (now < player.shotReadyAt || player.fallingUntil > now) return;
+  if (player.ammo <= 0) {
+    showToast("총알을 다 썼다! 구덩이 또는 체크포인트 복귀 시 회복.");
+    player.shotReadyAt = now + 220;
+    return;
+  }
+  const aimVector = getAimVector();
+  player.ammo -= 1;
+  player.shotReadyAt = now + 210;
+  projectiles.push({ kind: "bullet", owner: "player", x: player.x + aimVector.x * 8, y: player.y + aimVector.y * 2, velocityX: aimVector.x * 430, velocityY: aimVector.y * 430, until: now + 620, radius: 0 });
+}
+
+function respawnBot(bot: TestBot, now: number) {
+  const point = RESPAWN_POINTS[Math.min(bot.checkpoint, RESPAWN_POINTS.length - 1)];
+  bot.x = point.x + (bot.id % 2 ? 10 : -10);
+  bot.y = point.y + (bot.id % 3 - 1) * 9;
+  bot.health = 5;
+  bot.knockbackX = 0;
+  bot.knockbackY = 0;
+  bot.sleepUntil = now + 250;
+}
+
+function damageBot(bot: TestBot, now: number) {
+  bot.health -= 1;
+  if (bot.health <= 0) {
+    respawnBot(bot, now);
+    showToast(`${bot.name} 처치! 체크포인트에서 부활.`);
+  } else {
+    bot.knockbackX += (bot.x - player.x) * 4;
+    bot.knockbackY += (bot.y - player.y) * 4;
+  }
+}
+
+function damagePlayer(now: number) {
+  player.health -= 1;
+  if (player.health <= 0) {
+    player.health = 5;
+    respawnAtCheckpoint("라이프가 모두 소진됐다! 체크포인트에서 부활.", now);
+  } else {
+    showToast(`피격! 라이프 ${player.health}/5`);
+  }
+}
+
+function spawnMatchBots(now: number) {
+  testBots.length = 0;
+  const colors = ["#f4c562", "#78d8e9", "#a985e6", "#e58fba", "#8edb8a"];
+  const spawns = [{ x: 178, y: START_POINT.y }, { x: 226, y: START_POINT.y }, { x: 274, y: START_POINT.y }, { x: 322, y: START_POINT.y }, { x: 370, y: START_POINT.y }];
+  for (let index = 0; index < roomConfig.playerCount - 1; index += 1) {
+    const spawn = spawns[index];
+    testBots.push({ id: index + 1, x: spawn.x, y: spawn.y, direction: "right", walking: index, color: colors[index], name: `러너 ${index + 2}`, skill: roomConfig.enabledSkills[index % roomConfig.enabledSkills.length], moveX: 0, moveY: 0, nextTurnAt: now + index * 500, knockbackX: 0, knockbackY: 0, slowUntil: 0, sleepUntil: 0, health: 5, lap: 0, checkpoint: 0, routeIndex: 0, shotReadyAt: now + 1700 + index * 350 });
+  }
+}
+
 function canBotStand(bot: TestBot, x: number, y: number) {
+  if (gameMode === "track") {
+    const feet = [[x - 4, y - 3], [x + 4, y - 3], [x - 4, y + 6], [x + 4, y + 6]];
+    if (!feet.every(([footX, footY]) => isTrackPoint(footX, footY))) return false;
+    return !clones.some((clone) => Math.abs(x - clone.x) < 13 && Math.abs(y - clone.y) < 14);
+  }
   if (x - 6 < PRACTICE_ARENA.left || x + 6 > PRACTICE_ARENA.right || y - 6 < PRACTICE_ARENA.top || y + 8 > PRACTICE_ARENA.bottom) return false;
   return !clones.some((clone) => Math.abs(x - clone.x) < 13 && Math.abs(y - clone.y) < 14);
 }
@@ -690,14 +1131,69 @@ function updatePracticeBots(now: number, dt: number) {
   }
 }
 
+function updateTrackBots(now: number, dt: number) {
+  for (let index = clones.length - 1; index >= 0; index -= 1) if (clones[index].until <= now) clones.splice(index, 1);
+  if (dashCharges === 0 && now >= dashRechargeAt) dashCharges = 3;
+  const route = [RESPAWN_POINTS[1], RESPAWN_POINTS[2], RESPAWN_POINTS[3], RESPAWN_POINTS[0]];
+  for (const bot of testBots) {
+    if (bot.sleepUntil > now) continue;
+    const target = route[bot.routeIndex];
+    const dx = target.x - bot.x;
+    const dy = target.y - bot.y;
+    const distance = Math.hypot(dx, dy);
+    const speed = bot.slowUntil > now ? 29 : 72;
+    if (distance < 12) {
+      if (bot.routeIndex === 3) {
+        bot.lap += 1;
+        bot.checkpoint = 0;
+        if (bot.lap >= roomConfig.lapLimit) {
+          finishMatch(bot.name);
+          return;
+        }
+      } else bot.checkpoint = bot.routeIndex + 1;
+      bot.routeIndex = (bot.routeIndex + 1) % route.length;
+      continue;
+    }
+    const moveX = dx / distance;
+    const moveY = dy / distance;
+    bot.direction = Math.abs(moveX) > Math.abs(moveY) ? (moveX < 0 ? "left" : "right") : (moveY < 0 ? "up" : "down");
+    const candidateX = bot.x + moveX * speed * dt;
+    const candidateY = bot.y + moveY * speed * dt;
+    if (canBotStand(bot, candidateX, bot.y)) bot.x = candidateX;
+    if (canBotStand(bot, bot.x, candidateY)) bot.y = candidateY;
+    if (Math.abs(bot.knockbackX) > 2 || Math.abs(bot.knockbackY) > 2) {
+      if (canBotStand(bot, bot.x + bot.knockbackX * dt, bot.y)) bot.x += bot.knockbackX * dt;
+      if (canBotStand(bot, bot.x, bot.y + bot.knockbackY * dt)) bot.y += bot.knockbackY * dt;
+      bot.knockbackX *= Math.pow(.02, dt);
+      bot.knockbackY *= Math.pow(.02, dt);
+    }
+    const playerDistance = Math.hypot(player.x - bot.x, player.y - bot.y);
+    if (playerDistance < 165 && now >= bot.shotReadyAt) {
+      const bulletX = (player.x - bot.x) / Math.max(1, playerDistance);
+      const bulletY = (player.y - bot.y) / Math.max(1, playerDistance);
+      projectiles.push({ kind: "bullet", owner: "bot", sourceId: bot.id, x: bot.x + bulletX * 8, y: bot.y + bulletY * 2, velocityX: bulletX * 300, velocityY: bulletY * 300, until: now + 650, radius: 0 });
+      bot.shotReadyAt = now + 2600 + Math.random() * 900;
+    }
+    bot.walking += dt * (bot.slowUntil > now ? 5 : 10);
+  }
+}
+
 function updateProjectiles(now: number, dt: number) {
   for (let index = projectiles.length - 1; index >= 0; index -= 1) {
     const projectile = projectiles[index];
     projectile.x += projectile.velocityX * dt;
     projectile.y += projectile.velocityY * dt;
-    const target = testBots.find((bot) => Math.hypot(bot.x - projectile.x, bot.y - projectile.y) < 11);
-    const expired = now >= projectile.until || projectile.x < PRACTICE_ARENA.left || projectile.x > PRACTICE_ARENA.right || projectile.y < PRACTICE_ARENA.top || projectile.y > PRACTICE_ARENA.bottom;
-    if (!target && !expired) continue;
+    const target = projectile.owner === "player"
+      ? testBots.find((bot) => Math.hypot(bot.x - projectile.x, bot.y - projectile.y) < 11)
+      : undefined;
+    const playerHit = projectile.owner === "bot" && Math.hypot(player.x - projectile.x, player.y - projectile.y) < 11;
+    const outside = gameMode === "practice"
+      ? projectile.x < PRACTICE_ARENA.left || projectile.x > PRACTICE_ARENA.right || projectile.y < PRACTICE_ARENA.top || projectile.y > PRACTICE_ARENA.bottom
+      : projectile.x < 0 || projectile.x > WORLD_WIDTH || projectile.y < 0 || projectile.y > WORLD_HEIGHT;
+    const expired = now >= projectile.until || outside;
+    if (!target && !playerHit && !expired) continue;
+    if (projectile.kind === "bullet" && target) damageBot(target, now);
+    if (projectile.kind === "bullet" && playerHit) damagePlayer(now);
     if (projectile.kind === "slow") {
       const count = applySlow(projectile.x, projectile.y, projectile.radius, now);
       showToast(count ? `${count}명이 느려졌다!` : "슬로우탄이 빈 곳에서 터졌다.");
@@ -725,21 +1221,23 @@ function updateObjective() {
     elements.objective.textContent = "TEST BOTS";
     return;
   }
-  if (lap >= 1) {
-    elements.objective.textContent = "1 LAP FINISH!";
+  if (matchFinished) {
+    elements.objective.textContent = "MATCH FINISHED";
     return;
   }
   elements.objective.textContent = checkpointIndex < checkpoints.length ? `CHECKPOINT ${checkpointIndex + 1}` : "START GATE!";
 }
 
+function finishMatch(winner: string) {
+  if (matchFinished) return;
+  matchFinished = true;
+  pressedKeys.clear();
+  updateObjective();
+  showToast(`★ ${winner} 승리! ${roomConfig.lapLimit}랩을 가장 먼저 완주했습니다. ★`);
+}
+
 function respawnAtCheckpoint(message: string, now: number) {
-  const respawns = [
-    { x: 128, y: 552 },
-    { x: 744, y: 552 },
-    { x: 790, y: 120 },
-    { x: 128, y: 120 },
-  ];
-  const safeSpot = respawns[Math.min(checkpointIndex, respawns.length - 1)];
+  const safeSpot = RESPAWN_POINTS[Math.min(checkpointIndex, RESPAWN_POINTS.length - 1)];
   player.x = safeSpot.x;
   player.y = safeSpot.y;
   player.knockbackX = 0;
@@ -747,6 +1245,7 @@ function respawnAtCheckpoint(message: string, now: number) {
   player.fallingUntil = 0;
   player.airUntil = 0;
   player.hitUntil = now + 550;
+  refillPlayerAmmo();
   showToast(message);
 }
 
@@ -811,12 +1310,14 @@ function updateHazards(now: number, dt: number) {
 }
 
 function updateProgress(now: number) {
-  if (player.fallingUntil > now) return;
+  if (matchFinished || player.fallingUntil > now) return;
   const playerLeft = player.x - 5;
   const playerTop = player.y - 5;
   const checkpoint = checkpoints[checkpointIndex];
   if (checkpoint && intersects(playerLeft, playerTop, 10, 12, checkpoint, 8)) {
     checkpointIndex += 1;
+    refillPlayerAmmo();
+    rollEquippedSkill(now);
     if (checkpointIndex === checkpoints.length) {
       startArmed = true;
       showToast("마지막 관문 통과! 시작선으로 돌아가세요.");
@@ -827,15 +1328,16 @@ function updateProgress(now: number) {
     return;
   }
 
-  const startGate = { x: 128, y: 506, width: 62, height: 82 };
+  const startGate = { x: 128, y: 810, width: 62, height: 82 };
   if (startArmed && intersects(playerLeft, playerTop, 10, 12, startGate, 5)) {
     lap += 1;
     checkpointIndex = 0;
     startArmed = false;
     player.hitUntil = now + 300;
-    elements.lap.textContent = `${lap} / 1 LAP`;
+    elements.lap.textContent = `${Math.min(lap, roomConfig.lapLimit)} / ${roomConfig.lapLimit} LAP`;
     updateObjective();
-    showToast("★ 1바퀴 완주! 말썽 운동장을 정복했다! ★");
+    if (lap >= roomConfig.lapLimit) finishMatch(player.name);
+    else showToast(`${lap}랩 완주! 다음 바퀴도 말썽을 피워보자.`);
   }
 }
 
@@ -950,6 +1452,9 @@ function drawTestBot(context: CanvasRenderingContext2D, bot: TestBot, cameraX: n
   const x = bot.x - cameraX;
   const y = bot.y - cameraY;
   drawPerson(context, x, y, bot.direction, bot.walking, bot.color, true);
+  const statusLeft = Math.round(x - 12);
+  drawHealthPips(context, statusLeft, y - 23, bot.health);
+  updateBotLabels(bot, statusLeft, y - 23);
   if (bot.slowUntil > time) {
     fillRect(context, "#76d7e7", x - 7, y - 9, 14, 2);
     fillRect(context, "#76d7e7", x - 7, y + 12, 14, 2);
@@ -959,9 +1464,6 @@ function drawTestBot(context: CanvasRenderingContext2D, bot: TestBot, cameraX: n
     context.font = "bold 8px monospace";
     context.fillText("Z", Math.round(x + 7), Math.round(y - 10));
   }
-  context.fillStyle = "#fff4d5";
-  context.font = "bold 6px monospace";
-  context.fillText(bot.name, Math.round(x - 11), Math.round(y - 13));
 }
 
 function drawClone(context: CanvasRenderingContext2D, clone: Clone, cameraX: number, cameraY: number, time: number) {
@@ -982,28 +1484,57 @@ function drawProjectile(context: CanvasRenderingContext2D, projectile: Projectil
     fillRect(context, "#efffc9", x - 1, y - 1, 3, 3);
     return;
   }
+  if (projectile.kind === "bullet") {
+    fillRect(context, projectile.owner === "player" ? "#fff0a7" : "#ff916d", x - 3, y - 2, 7, 5);
+    fillRect(context, projectile.owner === "player" ? "#e5795f" : "#fff0a7", x - 1, y - 1, 3, 3);
+    return;
+  }
   fillRect(context, "#4a345d", x - 5, y - 3, 11, 7);
   fillRect(context, "#d58ee9", x - 3, y - 2, 7, 5);
   fillRect(context, "#fff0cc", x + 2, y - 1, 3, 3);
 }
 
 function updateSkillBar(now: number) {
-  if (gameMode !== "practice") {
+  if (gameActive) {
     elements.skillBar.classList.add("hidden");
+    elements.skillBar.classList.remove("track-mode");
+    skillBarSignature = "";
     return;
   }
-  elements.skillBar.classList.remove("hidden");
+  elements.skillBar.classList.remove("hidden", "track-mode");
   const ids: SkillId[] = ["push", "dash", "run", "grab", "clone", "slow", "sleep"];
   const markup = ids.map((id, index) => {
     const remaining = Math.max(0, skillReadyAt[id] - now);
     const active = id === "run" && runUntil > now;
-    const status = id === "dash" ? (dashCharges > 0 ? `${dashCharges}/3` : `${Math.ceil(Math.max(0, dashRechargeAt - now) / 1000)}s`) : id === "clone" ? `${clones.length}/5` : active ? "RUN!" : remaining > 0 ? `${Math.ceil(remaining / 1000)}s` : "READY";
+    const status = id === "dash" ? (dashCharges > 0 ? `${dashCharges}/3` : `${Math.ceil(Math.max(0, dashRechargeAt - now) / 1000)}s`) : id === "clone" ? `${clones.length}/20` : active ? "RUN!" : remaining > 0 ? `${Math.ceil(remaining / 1000)}s` : "READY";
     const unavailable = !canUseSkill(id, now);
     return `<span class="skill-chip${unavailable ? " cooldown" : ""}${active ? " active" : ""}"><b>${index + 1}. ${skillLabels[id]}</b>${status}</span>`;
   }).join("") + `<span class="skill-chip"><b>R. 랜덤</b>ROLL</span>`;
   if (markup !== skillBarSignature) {
     skillBarSignature = markup;
     elements.skillBar.innerHTML = markup;
+  }
+}
+
+function escapeMarkup(value: string) {
+  return value.replace(/[&<>"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[character] ?? character);
+}
+
+function updateRaceBoard() {
+  if (gameMode !== "track") {
+    elements.raceBoard.classList.add("hidden");
+    return;
+  }
+  elements.raceBoard.classList.remove("hidden");
+  const playerCheckpoint = checkpointIndex < checkpoints.length ? `CP${checkpointIndex + 1}` : "START";
+  const runners = [
+    { id: 0, name: player.name, color: "#f16c7a", lap, checkpoint: checkpointIndex, label: playerCheckpoint, me: true },
+    ...testBots.map((bot) => ({ id: bot.id, name: bot.name, color: bot.color, lap: bot.lap, checkpoint: bot.checkpoint, label: bot.routeIndex < 3 ? `CP${bot.routeIndex + 1}` : "START", me: false })),
+  ].sort((a, b) => b.lap * 4 + b.checkpoint - (a.lap * 4 + a.checkpoint));
+  const markup = `<div class="race-title"><span>RACE BOARD</span><span>${roomConfig.playerCount}P</span></div>${runners.map((runner, index) => `<div class="race-row${runner.me ? " me" : ""}"><span>${index + 1}</span><i class="race-dot" style="background:${runner.color}"></i><span class="race-name">${escapeMarkup(runner.name)}</span><span class="race-progress">${Math.min(runner.lap, roomConfig.lapLimit)}/${roomConfig.lapLimit}</span><span class="race-cp">${runner.label}</span></div>`).join("")}`;
+  if (markup !== raceBoardSignature) {
+    raceBoardSignature = markup;
+    elements.raceBoard.innerHTML = markup;
   }
 }
 
@@ -1056,6 +1587,10 @@ function drawTown(context: CanvasRenderingContext2D, time: number) {
   }
   if (!playerDrawn) drawPlayer(context, cameraX, cameraY, time);
 
+  for (const bot of testBots) drawTestBot(context, bot, cameraX, cameraY, time);
+  for (const clone of clones) drawClone(context, clone, cameraX, cameraY, time);
+  for (const projectile of projectiles) drawProjectile(context, projectile, cameraX, cameraY);
+
   for (const spinner of spinners) drawSpinner(context, spinner, cameraX, cameraY);
   drawAimGuide(context, cameraX, cameraY, time);
 
@@ -1104,13 +1639,18 @@ function animate(now: number) {
   const dt = Math.min(.05, (now - lastFrame) / 1000);
   lastFrame = now;
   if (gameActive) {
-    if (gameMode === "track") updateHazards(now, dt);
-    else updatePracticeBots(now, dt);
-    updatePlayer(dt, now);
-    if (gameMode === "track") updateProgress(now);
-    else updateProjectiles(now, dt);
+    if (!matchFinished) {
+      if (gameMode === "track") {
+        updateHazards(now, dt);
+        updateTrackBots(now, dt);
+      } else updatePracticeBots(now, dt);
+      updatePlayer(dt, now);
+      if (gameMode === "track") updateProgress(now);
+      updateProjectiles(now, dt);
+    }
     drawTown(gameContext, now);
     updateSkillBar(now);
+    updateRaceBoard();
   }
   requestAnimationFrame(animate);
 }
@@ -1122,12 +1662,41 @@ function showToast(message: string) {
   toastTimer = window.setTimeout(() => elements.toast.classList.remove("visible"), 1900);
 }
 
+function readRoomConfig(): RoomConfig | undefined {
+  const lapLimit = Math.floor(Number(elements.lapCount.value));
+  const playerCount = Math.floor(Number(elements.playerCount.value));
+  const enabledSkills = [...elements.skillPool.querySelectorAll<HTMLInputElement>('input[type="checkbox"]:checked')]
+    .map((input) => input.value as SkillId)
+    .filter((id): id is SkillId => Object.hasOwn(skillLabels, id));
+  if (!Number.isFinite(lapLimit) || lapLimit < 1 || lapLimit > 999) {
+    showToast("목표 랩은 1부터 999까지의 숫자로 입력하세요.");
+    return undefined;
+  }
+  if (!Number.isFinite(playerCount) || playerCount < 2 || playerCount > 6) {
+    showToast("인원은 2명부터 6명까지 설정할 수 있어요.");
+    return undefined;
+  }
+  if (enabledSkills.length < 3) {
+    showToast("랜덤 스킬 풀에 최소 3개를 선택하세요.");
+    return undefined;
+  }
+  elements.lapCount.value = String(lapLimit);
+  elements.playerCount.value = String(playerCount);
+  return { lapLimit, playerCount, enabledSkills };
+}
+
 function startGame() {
+  const config = readRoomConfig();
+  if (!config) return;
   const name = elements.name.value.trim().slice(0, 10) || "말썽꾸러기";
+  const now = performance.now();
+  roomConfig = config;
   gameMode = "track";
+  resetWorldLabels();
+  matchFinished = false;
   player.name = name;
-  player.x = 128;
-  player.y = 552;
+  player.x = START_POINT.x;
+  player.y = START_POINT.y;
   player.direction = "right";
   player.walking = 0;
   player.knockbackX = 0;
@@ -1140,34 +1709,42 @@ function startGame() {
   player.dashUntil = 0;
   player.dashVelocityX = 0;
   player.dashVelocityY = 0;
+  player.health = 5;
+  player.ammo = 3;
+  player.shotReadyAt = 0;
   runUntil = 0;
-  testBots.length = 0;
   clones.length = 0;
   projectiles.length = 0;
-  elements.skillBar.classList.add("hidden");
-  elements.area.textContent = "말썽 운동장";
+  (Object.keys(skillReadyAt) as SkillId[]).forEach((id) => { skillReadyAt[id] = 0; });
+  dashCharges = 3;
+  dashRechargeAt = 0;
+  spawnMatchBots(now);
+  rollEquippedSkill(now, false);
+  skillBarSignature = "";
+  raceBoardSignature = "";
   elements.practice.textContent = "스킬 연습장 이동";
   lap = 0;
   checkpointIndex = 0;
   startArmed = false;
   activePitIndex = -1;
   pits.forEach((pit) => { pit.active = false; });
-  nextPitAt = performance.now() + 1800;
+  nextPitAt = now + 1800;
   jumpPadCooldownUntil = 0;
   aim.visible = false;
   aim.pulseUntil = 0;
-  elements.lap.textContent = "0 / 1 LAP";
+  elements.lap.textContent = `0 / ${roomConfig.lapLimit} LAP`;
   updateObjective();
   elements.playerName.textContent = name;
   elements.lobby.classList.add("hidden");
   elements.game.classList.remove("hidden");
   gameActive = true;
   elements.gameCanvas.focus();
-  showToast(`${name}, 말썽 운동장 트랙에 입장!`);
+  showToast(`${name}, ${roomConfig.playerCount}인 ${roomConfig.lapLimit}랩 레이스 시작!`);
 }
 
 function resetSkillPractice(now: number) {
   testBots.length = 0;
+  resetWorldLabels();
   clones.length = 0;
   projectiles.length = 0;
   const opponents = [
@@ -1176,7 +1753,8 @@ function resetSkillPractice(now: number) {
     { x: 345, y: 445, color: "#a985e6", name: "테스터 보라" },
     { x: 555, y: 445, color: "#e58fba", name: "테스터 분홍" },
   ];
-  opponents.forEach((opponent, index) => testBots.push({ ...opponent, id: index + 1, direction: "down", walking: index, moveX: 0, moveY: 0, nextTurnAt: now + index * 190, knockbackX: 0, knockbackY: 0, slowUntil: 0, sleepUntil: 0 }));
+  const practiceSkills: SkillId[] = ["push", "dash", "run", "grab", "clone", "slow", "sleep"];
+  opponents.forEach((opponent, index) => testBots.push({ ...opponent, id: index + 1, skill: practiceSkills[index % practiceSkills.length], direction: "down", walking: index, moveX: 0, moveY: 0, nextTurnAt: now + index * 190, knockbackX: 0, knockbackY: 0, slowUntil: 0, sleepUntil: 0, health: 5, lap: 0, checkpoint: 0, routeIndex: 0, shotReadyAt: 0 }));
   (Object.keys(skillReadyAt) as SkillId[]).forEach((id) => { skillReadyAt[id] = 0; });
   dashCharges = 3;
   dashRechargeAt = 0;
@@ -1199,7 +1777,6 @@ function enterPractice() {
   player.dashUntil = 0;
   runUntil = 0;
   resetSkillPractice(now);
-  elements.area.textContent = "스킬 연습장";
   elements.practice.textContent = "운동장으로 돌아가기";
   updateObjective();
   showToast("스킬 연습장 입장! 숫자 1~7 또는 R을 눌러 테스트하세요.");
@@ -1207,8 +1784,8 @@ function enterPractice() {
 
 function returnToTrack() {
   gameMode = "track";
-  player.x = 128;
-  player.y = 552;
+  player.x = START_POINT.x;
+  player.y = START_POINT.y;
   player.direction = "right";
   player.knockbackX = 0;
   player.knockbackY = 0;
@@ -1218,7 +1795,6 @@ function returnToTrack() {
   clones.length = 0;
   projectiles.length = 0;
   elements.skillBar.classList.add("hidden");
-  elements.area.textContent = "말썽 운동장";
   elements.practice.textContent = "스킬 연습장 이동";
   updateObjective();
   showToast("운동장 트랙으로 돌아왔다.");
@@ -1234,15 +1810,129 @@ function returnToLobby() {
   gameActive = false;
   aim.visible = false;
   pressedKeys.clear();
+  if (document.fullscreenElement) void document.exitFullscreen();
   elements.skillBar.classList.add("hidden");
   elements.game.classList.add("hidden");
   elements.lobby.classList.remove("hidden");
 }
 
+function openLobby(mode: "join" | "create") {
+  elements.title.classList.add("hidden");
+  elements.lobby.classList.remove("hidden");
+  elements.lobby.classList.toggle("join-focus", mode === "join");
+  elements.lobby.classList.toggle("create-focus", mode === "create");
+  drawLobbyPreview();
+}
+
+type TitleRoomMode = "join" | "create";
+let titleRoomMode: TitleRoomMode = "join";
+
+function createInviteCode() {
+  return `PM-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+}
+
+function syncTitleSkillPoolFromRoom() {
+  const enabled = new Set([...elements.skillPool.querySelectorAll<HTMLInputElement>('input[type="checkbox"]:checked')].map((input) => input.value));
+  for (const input of elements.titleSkillPool.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')) input.checked = enabled.has(input.value);
+}
+
+function syncRoomFromTitleSkillPool() {
+  const enabled = new Set([...elements.titleSkillPool.querySelectorAll<HTMLInputElement>('input[type="checkbox"]:checked')].map((input) => input.value));
+  for (const input of elements.skillPool.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')) input.checked = enabled.has(input.value);
+}
+
+function openTitleRoomPanel(mode: TitleRoomMode) {
+  titleRoomMode = mode;
+  elements.titleRoomPanel.classList.remove("hidden");
+  elements.titleRoomPanel.classList.toggle("create-mode", mode === "create");
+  elements.titleStage.classList.add("room-panel-open");
+  elements.titleStage.classList.toggle("create-panel-open", mode === "create");
+  if (mode === "join") {
+    elements.titlePanelMarker.textContent = "JOIN ROOM";
+    elements.titlePanelTitle.textContent = "방 참여하기";
+    elements.titleConfirm.textContent = "방 참가";
+    window.setTimeout(() => elements.titleRoomCode.focus(), 0);
+    return;
+  }
+  elements.titlePanelMarker.textContent = "CREATE ROOM";
+  elements.titlePanelTitle.textContent = "방 생성하기";
+  elements.titleConfirm.textContent = "방 열기";
+  elements.titleRunnerName.value = elements.name.value;
+  elements.titleLapCount.value = elements.lapCount.value;
+  elements.titlePlayerCount.value = elements.playerCount.value;
+  if (!elements.titleInviteCode.value.trim() || elements.titleInviteCode.value === "PM-7F2A") elements.titleInviteCode.value = createInviteCode();
+  syncTitleSkillPoolFromRoom();
+  window.setTimeout(() => elements.titleRunnerName.focus(), 0);
+}
+
+function closeTitleRoomPanel() {
+  elements.titleRoomPanel.classList.add("hidden");
+  elements.titleStage.classList.remove("room-panel-open");
+  elements.titleStage.classList.remove("create-panel-open");
+}
+
+function startFromTitleRoomPanel() {
+  if (titleRoomMode === "join") {
+    const code = elements.titleRoomCode.value.trim().toUpperCase();
+    if (code.length < 4) {
+      showToast("방 번호를 4자 이상 입력하세요.");
+      elements.titleRoomCode.focus();
+      return;
+    }
+    elements.lapCount.value = "5";
+    elements.playerCount.value = "4";
+    closeTitleRoomPanel();
+    startGame();
+    showToast(`${code} 방에 참가했습니다. 로컬 레이스를 시작합니다!`);
+    return;
+  }
+
+  const inviteCode = elements.titleInviteCode.value.trim().toUpperCase();
+  if (inviteCode.length < 4) {
+    showToast("초대 코드를 4자 이상 입력하세요.");
+    elements.titleInviteCode.focus();
+    return;
+  }
+  elements.name.value = elements.titleRunnerName.value.trim().slice(0, 10) || "말썽꾸러기";
+  elements.lapCount.value = elements.titleLapCount.value;
+  elements.playerCount.value = elements.titlePlayerCount.value;
+  syncRoomFromTitleSkillPool();
+  closeTitleRoomPanel();
+  startGame();
+  if (gameActive) showToast(`방 생성 완료 · 초대 코드 ${inviteCode}`);
+}
+
+function joinLocalRoom() {
+  elements.lapCount.value = "5";
+  elements.playerCount.value = "4";
+  startGame();
+}
+
+async function toggleFullscreen() {
+  try {
+    if (document.fullscreenElement) await document.exitFullscreen();
+    else await elements.game.requestFullscreen();
+  } catch {
+    showToast("이 브라우저에서는 전체 화면을 열지 못했어요.");
+  }
+}
+
+document.addEventListener("fullscreenchange", () => {
+  elements.fullscreen.textContent = document.fullscreenElement ? "전체 화면 종료" : "전체 화면";
+});
+
 elements.enter.addEventListener("click", startGame);
+elements.join.addEventListener("click", joinLocalRoom);
+elements.openJoin.addEventListener("click", () => openTitleRoomPanel("join"));
+elements.openCreate.addEventListener("click", () => openTitleRoomPanel("create"));
+elements.titleConfirm.addEventListener("click", startFromTitleRoomPanel);
+elements.titlePanelBack.addEventListener("click", closeTitleRoomPanel);
+elements.titleRoomCode.addEventListener("keydown", (event) => { if (event.key === "Enter") startFromTitleRoomPanel(); });
+elements.titleInviteCode.addEventListener("keydown", (event) => { if (event.key === "Enter") startFromTitleRoomPanel(); });
 elements.name.addEventListener("keydown", (event) => { if (event.key === "Enter") startGame(); });
 elements.back.addEventListener("click", returnToLobby);
 elements.practice.addEventListener("click", togglePractice);
+elements.fullscreen.addEventListener("click", () => { void toggleFullscreen(); });
 
 function updateAimFromPointer(event: PointerEvent) {
   const bounds = elements.gameCanvas.getBoundingClientRect();
@@ -1258,12 +1948,17 @@ elements.gameCanvas.addEventListener("pointermove", (event) => {
   if (gameActive) updateAimFromPointer(event);
 });
 elements.gameCanvas.addEventListener("pointerdown", (event) => {
-  if (!gameActive || event.button !== 0) return;
+  if (!gameActive || (event.button !== 0 && event.button !== 2) || matchFinished) return;
   event.preventDefault();
   updateAimFromPointer(event);
-  aim.pulseX = aim.worldX;
-  aim.pulseY = aim.worldY;
-  aim.pulseUntil = performance.now() + 400;
+  const now = performance.now();
+  if (event.button === 0) {
+    fireBasicShot(now);
+    aim.pulseX = aim.worldX;
+    aim.pulseY = aim.worldY;
+    aim.pulseUntil = now + 180;
+  } else if (gameMode === "track") useSkill(equippedSkill, now);
+  else useRandomSkill(now);
   elements.gameCanvas.focus();
 });
 elements.gameCanvas.addEventListener("contextmenu", (event) => event.preventDefault());
@@ -1271,11 +1966,15 @@ window.addEventListener("keydown", (event) => {
   const key = event.key.toLowerCase();
   if (event.target instanceof HTMLInputElement) return;
   if (key === "escape" && gameActive) {
+    if (document.fullscreenElement) {
+      void document.exitFullscreen();
+      return;
+    }
     returnToLobby();
     return;
   }
   const skillByKey: Record<string, SkillId | undefined> = { "1": "push", "2": "dash", "3": "run", "4": "grab", "5": "clone", "6": "slow", "7": "sleep" };
-  if (gameActive && skillByKey[key]) {
+  if (gameActive && gameMode === "practice" && skillByKey[key]) {
     event.preventDefault();
     useSkill(skillByKey[key], performance.now());
     return;
