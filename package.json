@@ -3,11 +3,18 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite --host 127.0.0.1 --port 5174 --strictPort",
+    "vite": "vite --host 127.0.0.1 --port 5174 --strictPort",
+    "server": "node --watch server/index.mjs",
+    "dev": "concurrently -k \"npm:server\" \"npm:vite\"",
+    "multiplayer": "npm run dev",
     "build": "tsc -b && vite build",
     "check": "tsc -b --pretty false"
   },
-  "dependencies": {},
+  "dependencies": {
+    "concurrently": "^10.0.3",
+    "socket.io": "^4.8.3",
+    "socket.io-client": "^4.8.3"
+  },
   "devDependencies": {
     "typescript": "^5.8.3",
     "vite": "^6.3.5"
