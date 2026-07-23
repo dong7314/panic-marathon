@@ -1,4 +1,5 @@
 import titleKeyArt from "./assets/title-keyart-pixel-v3.png";
+import { io } from "socket.io-client";
 import "./style.css";
 
 const VIEW_WIDTH = 384;
@@ -27,6 +28,7 @@ type Player = {
   direction: Direction;
   walking: number;
   name: string;
+  color: string;
   knockbackX: number;
   knockbackY: number;
   hitUntil: number;
@@ -50,9 +52,16 @@ type AimState = { screenX: number; screenY: number; worldX: number; worldY: numb
 type GameMode = "track" | "practice";
 type SkillId = "push" | "dash" | "run" | "grab" | "clone" | "slow" | "sleep";
 type TestBot = { id: number; x: number; y: number; direction: Direction; walking: number; color: string; name: string; skill: SkillId; moveX: number; moveY: number; nextTurnAt: number; knockbackX: number; knockbackY: number; slowUntil: number; sleepUntil: number; health: number; lap: number; checkpoint: number; routeIndex: number; shotReadyAt: number };
-type Clone = { x: number; y: number; direction: Direction; until: number };
-type Projectile = { kind: "slow" | "sleep" | "bullet"; owner: "player" | "bot"; sourceId?: number; x: number; y: number; velocityX: number; velocityY: number; until: number; radius: number };
+type Clone = { x: number; y: number; direction: Direction; until: number; ownerId?: string };
+type Projectile = { kind: "slow" | "sleep" | "bullet"; owner: "player" | "bot" | "remote"; sourceId?: string | number; x: number; y: number; velocityX: number; velocityY: number; until: number; radius: number; visualOnly?: boolean };
 type RoomConfig = { lapLimit: number; playerCount: number; enabledSkills: SkillId[] };
+type NetworkPlayer = { id: string; name: string; color: string; x: number; y: number; direction: Direction; walking: number; health: number; ammo: number; skill: SkillId; lap: number; checkpoint: number; skillCooldownMs?: number; cloneCount?: number; dashCharges?: number; dashRechargeMs?: number };
+type NetworkClone = { id: string; ownerId: string; x: number; y: number; direction: Direction; until: number };
+type RemotePlayer = NetworkPlayer & { targetX: number; targetY: number; targetWalking: number; skillCooldownUntil: number; dashRechargeUntil: number };
+type NetworkRoom = { code: string; hostId: string; config: RoomConfig; started: boolean; players: NetworkPlayer[]; clones: NetworkClone[] };
+type NetworkResponse = { ok: true; room: NetworkRoom } | { ok: false; error: string };
+type LabelledRunner = Pick<TestBot, "id" | "name" | "skill"> | Pick<RemotePlayer, "id" | "name" | "skill" | "skillCooldownUntil" | "cloneCount" | "dashCharges" | "dashRechargeUntil">;
+type GrappleEffect = { sourceId: string | number; targetId?: string | number; sourceX: number; sourceY: number; hookX: number; hookY: number; targetStartX?: number; targetStartY?: number; targetEndX?: number; targetEndY?: number; startedAt: number; until: number };
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("앱을 찾을 수 없어요.");
@@ -273,23 +282,46 @@ const checkpoints = [
   { x: 1120, y: 80, width: 72, height: 74, spawnX: 1152, spawnY: 120 },
   { x: 105, y: 80, width: 72, height: 74, spawnX: 128, spawnY: 120 },
 ];
-const player: Player = { x: START_POINT.x, y: START_POINT.y, direction: "right", walking: 0, name: "말썽꾸러기", knockbackX: 0, knockbackY: 0, hitUntil: 0, fallingUntil: 0, fallingStartedAt: 0, fallTargetX: 0, fallTargetY: 0, airUntil: 0, airStartedAt: 0, dashUntil: 0, dashVelocityX: 0, dashVelocityY: 0, health: 5, ammo: 3, shotReadyAt: 0 };
+const player: Player = { x: START_POINT.x, y: START_POINT.y, direction: "right", walking: 0, name: "말썽꾸러기", color: "#f16c7a", knockbackX: 0, knockbackY: 0, hitUntil: 0, fallingUntil: 0, fallingStartedAt: 0, fallTargetX: 0, fallTargetY: 0, airUntil: 0, airStartedAt: 0, dashUntil: 0, dashVelocityX: 0, dashVelocityY: 0, health: 5, ammo: 3, shotReadyAt: 0 };
 const PRACTICE_ARENA = { left: 180, top: 136, right: 716, bottom: 536 };
 const testBots: TestBot[] = [];
 type BotWorldLabelGroup = { container: HTMLDivElement; name: HTMLSpanElement; skill: HTMLSpanElement };
-const botWorldLabels = new Map<number, BotWorldLabelGroup>();
+const botWorldLabels = new Map<string | number, BotWorldLabelGroup>();
+const remotePlayers = new Map<string, RemotePlayer>();
+const multiplayerEndpoint = import.meta.env.VITE_MULTIPLAYER_URL ?? `${window.location.protocol}//${window.location.hostname}:5175`;
+const socket = io(multiplayerEndpoint, { autoConnect: false });
+let activeNetworkRoom: NetworkRoom | undefined;
+let multiplayerActive = false;
+let lastNetworkStateAt = 0;
+let networkSleepUntil = 0;
+let networkSlowUntil = 0;
+let grappleLockUntil = 0;
 const clones: Clone[] = [];
 const projectiles: Projectile[] = [];
+const grappleEffects: GrappleEffect[] = [];
 const skillReadyAt: Record<SkillId, number> = { push: 0, dash: 0, run: 0, grab: 0, clone: 0, slow: 0, sleep: 0 };
 const skillLabels: Record<SkillId, string> = { push: "밀치기", dash: "돌진", run: "질주", grab: "그랩", clone: "분신", slow: "슬로우탄", sleep: "수면총" };
 let dashCharges = 3;
 let dashRechargeAt = 0;
 let runUntil = 0;
 let gameMode: GameMode = "track";
+let skillTestRoomActive = false;
 let roomConfig: RoomConfig = { lapLimit: 5, playerCount: 4, enabledSkills: ["push", "dash", "run", "grab", "clone", "slow", "sleep"] };
 let equippedSkill: SkillId = "push";
 let matchFinished = false;
 const pressedKeys = new Set<string>();
+
+function getControlKey(event: KeyboardEvent) {
+  const physicalKeys: Record<string, string> = {
+    KeyW: "w",
+    KeyA: "a",
+    KeyS: "s",
+    KeyD: "d",
+    KeyR: "r",
+  };
+  return physicalKeys[event.code] ?? event.key.toLowerCase();
+}
+
 let gameActive = false;
 let lastFrame = performance.now();
 let titleAnimationStartedAt = performance.now();
@@ -639,7 +671,7 @@ function drawPlayer(context: CanvasRenderingContext2D, cameraX: number, cameraY:
     context.save();
     context.translate(Math.round(drawX), Math.round(drawY));
     context.scale(scale, scale);
-    drawPerson(context, 0, 0, player.direction, player.walking);
+    drawPerson(context, 0, 0, player.direction, player.walking, player.color);
     context.restore();
     return;
   }
@@ -648,7 +680,7 @@ function drawPlayer(context: CanvasRenderingContext2D, cameraX: number, cameraY:
   const lift = airProgress > 0 ? Math.sin(airProgress * Math.PI) * 18 : 0;
   const drawY = baseY - lift;
   if (lift > 0) fillRect(context, "rgba(38,31,54,.3)", baseX - 8, baseY + 10, 16, 3);
-  drawPerson(context, baseX, drawY, player.direction, player.walking);
+  drawPerson(context, baseX, drawY, player.direction, player.walking, player.color);
   const statusLeft = Math.round(baseX - 12);
   drawHealthPips(context, statusLeft, drawY - 18, player.health);
   drawAmmoPips(context, statusLeft, drawY - 27, player.ammo);
@@ -1527,11 +1559,14 @@ function updateRaceBoard() {
   }
   elements.raceBoard.classList.remove("hidden");
   const playerCheckpoint = checkpointIndex < checkpoints.length ? `CP${checkpointIndex + 1}` : "START";
+  const otherRunners = multiplayerActive
+    ? [...remotePlayers.values()].map((runner) => ({ id: runner.id, name: runner.name, color: runner.color, lap: runner.lap, checkpoint: runner.checkpoint, label: runner.checkpoint < 3 ? `CP${runner.checkpoint + 1}` : "START", me: false }))
+    : testBots.map((bot) => ({ id: bot.id, name: bot.name, color: bot.color, lap: bot.lap, checkpoint: bot.checkpoint, label: bot.routeIndex < 3 ? `CP${bot.routeIndex + 1}` : "START", me: false }));
   const runners = [
-    { id: 0, name: player.name, color: "#f16c7a", lap, checkpoint: checkpointIndex, label: playerCheckpoint, me: true },
-    ...testBots.map((bot) => ({ id: bot.id, name: bot.name, color: bot.color, lap: bot.lap, checkpoint: bot.checkpoint, label: bot.routeIndex < 3 ? `CP${bot.routeIndex + 1}` : "START", me: false })),
+    { id: 0, name: player.name, color: player.color, lap, checkpoint: checkpointIndex, label: playerCheckpoint, me: true },
+    ...otherRunners,
   ].sort((a, b) => b.lap * 4 + b.checkpoint - (a.lap * 4 + a.checkpoint));
-  const markup = `<div class="race-title"><span>RACE BOARD</span><span>${roomConfig.playerCount}P</span></div>${runners.map((runner, index) => `<div class="race-row${runner.me ? " me" : ""}"><span>${index + 1}</span><i class="race-dot" style="background:${runner.color}"></i><span class="race-name">${escapeMarkup(runner.name)}</span><span class="race-progress">${Math.min(runner.lap, roomConfig.lapLimit)}/${roomConfig.lapLimit}</span><span class="race-cp">${runner.label}</span></div>`).join("")}`;
+  const markup = `<div class="race-title"><span>RACE BOARD</span><span>${runners.length}P</span></div>${runners.map((runner, index) => `<div class="race-row${runner.me ? " me" : ""}"><span>${index + 1}</span><i class="race-dot" style="background:${runner.color}"></i><span class="race-name">${escapeMarkup(runner.name)}</span><span class="race-progress">${Math.min(runner.lap, roomConfig.lapLimit)}/${roomConfig.lapLimit}</span><span class="race-cp">${runner.label}</span></div>`).join("")}`;
   if (markup !== raceBoardSignature) {
     raceBoardSignature = markup;
     elements.raceBoard.innerHTML = markup;
@@ -1647,6 +1682,10 @@ function animate(now: number) {
       updatePlayer(dt, now);
       if (gameMode === "track") updateProgress(now);
       updateProjectiles(now, dt);
+      if (gameMode === "track") {
+        interpolateRemotePlayers(dt);
+        sendLocalNetworkState(now);
+      }
     }
     drawTown(gameContext, now);
     updateSkillBar(now);
@@ -1660,6 +1699,168 @@ function showToast(message: string) {
   elements.toast.classList.add("visible");
   if (toastTimer) clearTimeout(toastTimer);
   toastTimer = window.setTimeout(() => elements.toast.classList.remove("visible"), 1900);
+}
+
+function syncRemotePlayers(room: NetworkRoom) {
+  const present = new Set<string>();
+  for (const runner of room.players) {
+    if (runner.id === socket.id) continue;
+    present.add(runner.id);
+    upsertRemotePlayer(runner);
+  }
+  for (const id of remotePlayers.keys()) if (!present.has(id)) remotePlayers.delete(id);
+}
+
+function syncNetworkClones(room: NetworkRoom) {
+  if (!multiplayerActive) return;
+  clones.length = 0;
+  const receivedAt = performance.now();
+  for (const clone of room.clones ?? []) {
+    if (clone.until <= Date.now()) continue;
+    clones.push({ ...clone, until: receivedAt + (clone.until - Date.now()) });
+  }
+}
+
+function upsertRemotePlayer(runner: NetworkPlayer) {
+  const receivedAt = performance.now();
+  const current = remotePlayers.get(runner.id);
+  if (!current) {
+    remotePlayers.set(runner.id, {
+      ...runner,
+      targetX: runner.x,
+      targetY: runner.y,
+      targetWalking: runner.walking,
+      skillCooldownUntil: receivedAt + Math.max(0, runner.skillCooldownMs ?? 0),
+      dashRechargeUntil: receivedAt + Math.max(0, runner.dashRechargeMs ?? 0),
+    });
+    return;
+  }
+  current.name = runner.name;
+  current.color = runner.color;
+  current.direction = runner.direction;
+  current.health = runner.health;
+  current.ammo = runner.ammo;
+  current.skill = runner.skill;
+  current.cloneCount = runner.cloneCount;
+  current.dashCharges = runner.dashCharges;
+  current.skillCooldownUntil = receivedAt + Math.max(0, runner.skillCooldownMs ?? 0);
+  current.dashRechargeUntil = receivedAt + Math.max(0, runner.dashRechargeMs ?? 0);
+  current.lap = runner.lap;
+  current.checkpoint = runner.checkpoint;
+  current.targetX = runner.x;
+  current.targetY = runner.y;
+  current.targetWalking = runner.walking;
+}
+
+function interpolateRemotePlayers(dt: number) {
+  const amount = 1 - Math.exp(-16 * dt);
+  for (const runner of remotePlayers.values()) {
+    const distance = Math.hypot(runner.targetX - runner.x, runner.targetY - runner.y);
+    if (distance > 96) {
+      runner.x = runner.targetX;
+      runner.y = runner.targetY;
+    } else {
+      runner.x += (runner.targetX - runner.x) * amount;
+      runner.y += (runner.targetY - runner.y) * amount;
+    }
+    runner.walking += (runner.targetWalking - runner.walking) * amount;
+  }
+}
+
+function updateNetworkWaitingPanel() {
+  if (!activeNetworkRoom || gameActive) return;
+  const isHost = activeNetworkRoom.hostId === socket.id;
+  elements.titleRoomPanel.classList.add("network-waiting");
+  elements.titlePanelMarker.textContent = "ONLINE ROOM";
+  elements.titlePanelTitle.textContent = `${activeNetworkRoom.code} · ${activeNetworkRoom.players.length}/${activeNetworkRoom.config.playerCount}명`;
+  elements.titleConfirm.textContent = isHost ? "경기 시작" : "방장 시작 대기";
+  elements.titleConfirm.disabled = !isHost || activeNetworkRoom.players.length < 2;
+}
+
+function applyNetworkRoom(room: NetworkRoom) {
+  activeNetworkRoom = room;
+  roomConfig = room.config;
+  syncRemotePlayers(room);
+  syncNetworkClones(room);
+  const self = room.players.find((runner) => runner.id === socket.id);
+  if (self && multiplayerActive && gameActive) {
+    const receivedAt = performance.now();
+    player.color = self.color;
+    player.health = self.health;
+    player.ammo = self.ammo;
+    equippedSkill = self.skill;
+    skillReadyAt[self.skill] = Math.max(skillReadyAt[self.skill], receivedAt + Math.max(0, self.skillCooldownMs ?? 0));
+    if (self.dashCharges !== undefined) dashCharges = self.dashCharges;
+    if (self.dashRechargeMs !== undefined) dashRechargeAt = receivedAt + Math.max(0, self.dashRechargeMs);
+    lap = self.lap;
+    checkpointIndex = self.checkpoint;
+    if (player.dashUntil <= performance.now() && Math.hypot(self.x - player.x, self.y - player.y) > 12) {
+      player.x = self.x;
+      player.y = self.y;
+    }
+  }
+  if (!gameActive) updateNetworkWaitingPanel();
+}
+
+function ensureSocketConnected() {
+  if (socket.connected) return Promise.resolve();
+  return new Promise<void>((resolve, reject) => {
+    const timeout = window.setTimeout(() => {
+      socket.off("connect", connected);
+      socket.off("connect_error", failed);
+      reject(new Error("멀티플레이 서버 연결 시간이 초과됐습니다."));
+    }, 5000);
+    const connected = () => {
+      window.clearTimeout(timeout);
+      socket.off("connect_error", failed);
+      resolve();
+    };
+    const failed = () => {
+      window.clearTimeout(timeout);
+      socket.off("connect", connected);
+      reject(new Error("멀티플레이 서버에 연결하지 못했습니다."));
+    };
+    socket.once("connect", connected);
+    socket.once("connect_error", failed);
+    socket.connect();
+  });
+}
+
+function requestNetworkRoom(event: "room:create" | "room:join" | "room:start", payload?: unknown) {
+  return new Promise<NetworkRoom>((resolve, reject) => {
+    let settled = false;
+    const timeout = window.setTimeout(() => {
+      if (!settled) reject(new Error("서버 응답 시간이 초과됐습니다."));
+    }, 5000);
+    const done = (response: NetworkResponse) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timeout);
+      if (!response?.ok) {
+        reject(new Error(response?.error ?? "방 요청을 처리하지 못했습니다."));
+        return;
+      }
+      resolve(response.room);
+    };
+    if (payload === undefined) socket.emit(event, done);
+    else socket.emit(event, payload, done);
+  });
+}
+
+function sendLocalNetworkState(now: number) {
+  if (!multiplayerActive || !socket.connected || player.dashUntil > now || grappleLockUntil > now || now - lastNetworkStateAt < 55) return;
+  lastNetworkStateAt = now;
+  socket.emit("player:state", {
+    x: player.x,
+    y: player.y,
+    direction: player.direction,
+    walking: player.walking,
+    health: player.health,
+    ammo: player.ammo,
+    skill: equippedSkill,
+    lap,
+    checkpoint: checkpointIndex,
+  });
 }
 
 function readRoomConfig(): RoomConfig | undefined {
@@ -1688,6 +1889,10 @@ function readRoomConfig(): RoomConfig | undefined {
 function startGame() {
   const config = readRoomConfig();
   if (!config) return;
+  if (activeNetworkRoom) socket.emit("room:leave");
+  activeNetworkRoom = undefined;
+  multiplayerActive = false;
+  remotePlayers.clear();
   const name = elements.name.value.trim().slice(0, 10) || "말썽꾸러기";
   const now = performance.now();
   roomConfig = config;
@@ -1695,6 +1900,7 @@ function startGame() {
   resetWorldLabels();
   matchFinished = false;
   player.name = name;
+  player.color = "#f16c7a";
   player.x = START_POINT.x;
   player.y = START_POINT.y;
   player.direction = "right";
@@ -1718,7 +1924,7 @@ function startGame() {
   (Object.keys(skillReadyAt) as SkillId[]).forEach((id) => { skillReadyAt[id] = 0; });
   dashCharges = 3;
   dashRechargeAt = 0;
-  spawnMatchBots(now);
+  testBots.length = 0;
   rollEquippedSkill(now, false);
   skillBarSignature = "";
   raceBoardSignature = "";
@@ -1740,6 +1946,78 @@ function startGame() {
   gameActive = true;
   elements.gameCanvas.focus();
   showToast(`${name}, ${roomConfig.playerCount}인 ${roomConfig.lapLimit}랩 레이스 시작!`);
+}
+
+function startNetworkMatch(room: NetworkRoom) {
+  if (multiplayerActive && gameActive && activeNetworkRoom?.code === room.code) {
+    applyNetworkRoom(room);
+    return;
+  }
+  const self = room.players.find((runner) => runner.id === socket.id);
+  if (!self) return;
+  activeNetworkRoom = room;
+  multiplayerActive = true;
+  lastNetworkStateAt = 0;
+  networkSleepUntil = 0;
+  networkSlowUntil = 0;
+  grappleLockUntil = 0;
+  grappleEffects.length = 0;
+  roomConfig = room.config;
+  syncRemotePlayers(room);
+  const now = performance.now();
+  gameMode = "track";
+  resetWorldLabels();
+  matchFinished = false;
+  player.name = self.name;
+  player.color = self.color;
+  player.x = self.x;
+  player.y = self.y;
+  player.direction = self.direction;
+  player.walking = self.walking;
+  player.knockbackX = 0;
+  player.knockbackY = 0;
+  player.hitUntil = 0;
+  player.fallingUntil = 0;
+  player.fallingStartedAt = 0;
+  player.airUntil = 0;
+  player.airStartedAt = 0;
+  player.dashUntil = 0;
+  player.dashVelocityX = 0;
+  player.dashVelocityY = 0;
+  player.health = self.health;
+  player.ammo = self.ammo;
+  player.shotReadyAt = 0;
+  equippedSkill = self.skill;
+  runUntil = 0;
+  testBots.length = 0;
+  clones.length = 0;
+  syncNetworkClones(room);
+  projectiles.length = 0;
+  (Object.keys(skillReadyAt) as SkillId[]).forEach((id) => { skillReadyAt[id] = 0; });
+  skillReadyAt[self.skill] = now + Math.max(0, self.skillCooldownMs ?? 0);
+  dashCharges = self.dashCharges ?? 3;
+  dashRechargeAt = now + Math.max(0, self.dashRechargeMs ?? 0);
+  skillBarSignature = "";
+  raceBoardSignature = "";
+  elements.practice.textContent = "스킬 연습장 이동";
+  lap = self.lap;
+  checkpointIndex = self.checkpoint;
+  startArmed = false;
+  activePitIndex = -1;
+  pits.forEach((pit) => { pit.active = false; });
+  nextPitAt = now + 1800;
+  jumpPadCooldownUntil = 0;
+  aim.visible = false;
+  aim.pulseUntil = 0;
+  elements.lap.textContent = `${lap} / ${roomConfig.lapLimit} LAP`;
+  updateObjective();
+  elements.playerName.textContent = self.name;
+  elements.title.classList.add("hidden");
+  elements.lobby.classList.add("hidden");
+  elements.game.classList.remove("hidden");
+  gameActive = true;
+  elements.gameCanvas.focus();
+  showToast(`${room.code} 멀티 레이스 시작! ${room.players.length}명 연결됨.`);
 }
 
 function resetSkillPractice(now: number) {
@@ -1844,9 +2122,11 @@ function syncRoomFromTitleSkillPool() {
 function openTitleRoomPanel(mode: TitleRoomMode) {
   titleRoomMode = mode;
   elements.titleRoomPanel.classList.remove("hidden");
+  elements.titleRoomPanel.classList.remove("network-waiting");
   elements.titleRoomPanel.classList.toggle("create-mode", mode === "create");
   elements.titleStage.classList.add("room-panel-open");
   elements.titleStage.classList.toggle("create-panel-open", mode === "create");
+  elements.titleConfirm.disabled = false;
   if (mode === "join") {
     elements.titlePanelMarker.textContent = "JOIN ROOM";
     elements.titlePanelTitle.textContent = "방 참여하기";
@@ -1866,46 +2146,81 @@ function openTitleRoomPanel(mode: TitleRoomMode) {
 }
 
 function closeTitleRoomPanel() {
+  if (activeNetworkRoom && !gameActive) socket.emit("room:leave");
+  activeNetworkRoom = undefined;
+  remotePlayers.clear();
   elements.titleRoomPanel.classList.add("hidden");
+  elements.titleRoomPanel.classList.remove("network-waiting");
+  elements.titleConfirm.disabled = false;
   elements.titleStage.classList.remove("room-panel-open");
   elements.titleStage.classList.remove("create-panel-open");
 }
 
-function startFromTitleRoomPanel() {
-  if (titleRoomMode === "join") {
-    const code = elements.titleRoomCode.value.trim().toUpperCase();
-    if (code.length < 4) {
-      showToast("방 번호를 4자 이상 입력하세요.");
-      elements.titleRoomCode.focus();
+function startSkillTestRoom() {
+  elements.title.classList.add("hidden");
+  elements.lobby.classList.add("hidden");
+  startGame();
+  if (!gameActive) return;
+  skillTestRoomActive = true;
+  enterPractice();
+}
+
+async function startFromTitleRoomPanel() {
+  if (titleRoomMode === "join" && elements.titleRoomCode.value.trim().toUpperCase() === "TEST-SKILL") {
+    startSkillTestRoom();
+    return;
+  }
+  try {
+    await ensureSocketConnected();
+    if (activeNetworkRoom) {
+      if (activeNetworkRoom.hostId !== socket.id) return;
+      const room = await requestNetworkRoom("room:start");
+      applyNetworkRoom(room);
+      startNetworkMatch(room);
       return;
     }
-    elements.lapCount.value = "5";
-    elements.playerCount.value = "4";
-    closeTitleRoomPanel();
-    startGame();
-    showToast(`${code} 방에 참가했습니다. 로컬 레이스를 시작합니다!`);
-    return;
-  }
+    if (titleRoomMode === "join") {
+      const code = elements.titleRoomCode.value.trim().toUpperCase();
+      if (code.length < 4) {
+        showToast("방 번호를 4자 이상 입력하세요.");
+        elements.titleRoomCode.focus();
+        return;
+      }
+      const room = await requestNetworkRoom("room:join", { code, name: elements.name.value });
+      applyNetworkRoom(room);
+      if (room.started) {
+        startNetworkMatch(room);
+        showToast("TEST 방 입장 완료 · 혼자서도 바로 테스트할 수 있어요.");
+        return;
+      }
+      showToast(`${room.code} 방에 참가했습니다. 방장 시작을 기다리세요.`);
+      return;
+    }
 
-  const inviteCode = elements.titleInviteCode.value.trim().toUpperCase();
-  if (inviteCode.length < 4) {
-    showToast("초대 코드를 4자 이상 입력하세요.");
-    elements.titleInviteCode.focus();
-    return;
+    const inviteCode = elements.titleInviteCode.value.trim().toUpperCase();
+    if (inviteCode.length < 4) {
+      showToast("초대 코드를 4자 이상 입력하세요.");
+      elements.titleInviteCode.focus();
+      return;
+    }
+    elements.name.value = elements.titleRunnerName.value.trim().slice(0, 10) || "말썽꾸러기";
+    elements.lapCount.value = elements.titleLapCount.value;
+    elements.playerCount.value = elements.titlePlayerCount.value;
+    syncRoomFromTitleSkillPool();
+    const config = readRoomConfig();
+    if (!config) return;
+    const room = await requestNetworkRoom("room:create", { code: inviteCode, name: elements.name.value, config });
+    applyNetworkRoom(room);
+    showToast(`방 생성 완료 · 초대 코드 ${room.code}`);
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : "멀티플레이 방을 열지 못했습니다.");
   }
-  elements.name.value = elements.titleRunnerName.value.trim().slice(0, 10) || "말썽꾸러기";
-  elements.lapCount.value = elements.titleLapCount.value;
-  elements.playerCount.value = elements.titlePlayerCount.value;
-  syncRoomFromTitleSkillPool();
-  closeTitleRoomPanel();
-  startGame();
-  if (gameActive) showToast(`방 생성 완료 · 초대 코드 ${inviteCode}`);
 }
 
 function joinLocalRoom() {
-  elements.lapCount.value = "5";
-  elements.playerCount.value = "4";
-  startGame();
+  elements.title.classList.remove("hidden");
+  elements.lobby.classList.add("hidden");
+  openTitleRoomPanel("join");
 }
 
 async function toggleFullscreen() {
@@ -1925,10 +2240,10 @@ elements.enter.addEventListener("click", startGame);
 elements.join.addEventListener("click", joinLocalRoom);
 elements.openJoin.addEventListener("click", () => openTitleRoomPanel("join"));
 elements.openCreate.addEventListener("click", () => openTitleRoomPanel("create"));
-elements.titleConfirm.addEventListener("click", startFromTitleRoomPanel);
+elements.titleConfirm.addEventListener("click", () => { void startFromTitleRoomPanel(); });
 elements.titlePanelBack.addEventListener("click", closeTitleRoomPanel);
-elements.titleRoomCode.addEventListener("keydown", (event) => { if (event.key === "Enter") startFromTitleRoomPanel(); });
-elements.titleInviteCode.addEventListener("keydown", (event) => { if (event.key === "Enter") startFromTitleRoomPanel(); });
+elements.titleRoomCode.addEventListener("keydown", (event) => { if (event.key === "Enter") void startFromTitleRoomPanel(); });
+elements.titleInviteCode.addEventListener("keydown", (event) => { if (event.key === "Enter") void startFromTitleRoomPanel(); });
 elements.name.addEventListener("keydown", (event) => { if (event.key === "Enter") startGame(); });
 elements.back.addEventListener("click", returnToLobby);
 elements.practice.addEventListener("click", togglePractice);
@@ -1963,7 +2278,7 @@ elements.gameCanvas.addEventListener("pointerdown", (event) => {
 });
 elements.gameCanvas.addEventListener("contextmenu", (event) => event.preventDefault());
 window.addEventListener("keydown", (event) => {
-  const key = event.key.toLowerCase();
+  const key = getControlKey(event);
   if (event.target instanceof HTMLInputElement) return;
   if (key === "escape" && gameActive) {
     if (document.fullscreenElement) {
@@ -1990,7 +2305,7 @@ window.addEventListener("keydown", (event) => {
     pressedKeys.add(key);
   }
 });
-window.addEventListener("keyup", (event) => pressedKeys.delete(event.key.toLowerCase()));
+window.addEventListener("keyup", (event) => pressedKeys.delete(getControlKey(event)));
 window.addEventListener("blur", () => pressedKeys.clear());
 
 drawLobbyPreview();
