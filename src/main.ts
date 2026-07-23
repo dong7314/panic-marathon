@@ -4,6 +4,11 @@ import "./style.css";
 
 const VIEW_WIDTH = 384;
 const VIEW_HEIGHT = 216;
+const GRAB_RANGE = 250;
+const GRAB_HIT_RADIUS = 12;
+const CLONE_LIMIT = 20;
+const CLONE_COOLDOWN = 150;
+const CLONE_DURATION = 10_000;
 const TILE = 16;
 const MAP_WIDTH = 84;
 const MAP_HEIGHT = 63;
@@ -86,7 +91,7 @@ app.innerHTML = `
           <div class="title-join-fields">
             <label for="title-room-code">방 번호</label>
             <input id="title-room-code" maxlength="12" placeholder="예: PM-7F2A" autocomplete="off" />
-            <p>초대 받은 방 번호를 입력하세요.</p>
+            <p>초대 받은 방 번호를 입력하세요. <b>test</b>는 멀티 테스트, <b>test-skill</b>은 스킬 연습장입니다.</p>
           </div>
           <div class="title-create-fields">
             <label for="title-runner-name">러너 이름</label>
@@ -285,6 +290,7 @@ const checkpoints = [
 const player: Player = { x: START_POINT.x, y: START_POINT.y, direction: "right", walking: 0, name: "말썽꾸러기", color: "#f16c7a", knockbackX: 0, knockbackY: 0, hitUntil: 0, fallingUntil: 0, fallingStartedAt: 0, fallTargetX: 0, fallTargetY: 0, airUntil: 0, airStartedAt: 0, dashUntil: 0, dashVelocityX: 0, dashVelocityY: 0, health: 5, ammo: 3, shotReadyAt: 0 };
 const PRACTICE_ARENA = { left: 180, top: 136, right: 716, bottom: 536 };
 const testBots: TestBot[] = [];
+const LOCAL_GRAPPLE_ID = "local-player";
 type BotWorldLabelGroup = { container: HTMLDivElement; name: HTMLSpanElement; skill: HTMLSpanElement };
 const botWorldLabels = new Map<string | number, BotWorldLabelGroup>();
 const remotePlayers = new Map<string, RemotePlayer>();
@@ -629,13 +635,42 @@ function placeWorldLabel(element: HTMLElement, x: number, y: number) {
   element.classList.remove("hidden");
 }
 
+type SkillLabelStatus = { cooldownUntil?: number; cloneCount?: number; dashCharges?: number; dashRechargeUntil?: number };
+type SkillLabelDisplay = { text: string; charging: boolean };
+
+function formatSkillLabel(skill: SkillId, status: SkillLabelStatus, now: number): SkillLabelDisplay {
+  const name = skillLabels[skill].slice(0, 5);
+  const cooldown = Math.max(0, (status.cooldownUntil ?? 0) - now);
+  const seconds = Math.max(1, Math.ceil(cooldown / 1000));
+  if (skill === "clone") return { text: `${name} ${status.cloneCount ?? 0}/${CLONE_LIMIT}${cooldown > 0 ? ` ${seconds}s` : ""}`, charging: cooldown > 0 };
+  if (skill === "dash" && status.dashCharges !== undefined) {
+    if (status.dashCharges > 0 || (status.dashRechargeUntil ?? 0) <= now) return { text: `${name} ${status.dashCharges || 3}/3`, charging: false };
+    const remaining = Math.max(0, (status.dashRechargeUntil ?? now) - now);
+    return { text: `${name} 0/3 ${Math.max(1, Math.ceil(remaining / 1000))}s`, charging: true };
+  }
+  if (cooldown <= 0) return { text: name, charging: false };
+  return { text: `${name} ${seconds}s`, charging: true };
+}
+
+function renderSkillLabel(element: HTMLElement, skill: SkillId, status: SkillLabelStatus, now: number) {
+  const display = formatSkillLabel(skill, status, now);
+  if (element.textContent !== display.text) element.textContent = display.text;
+  element.classList.toggle("is-cooling", display.charging);
+}
+
 function updatePlayerSkillLabel(left: number, y: number) {
-  elements.playerSkillLabel.textContent = skillLabels[equippedSkill].slice(0, 5);
+  const now = performance.now();
+  renderSkillLabel(elements.playerSkillLabel, equippedSkill, {
+    cooldownUntil: skillReadyAt[equippedSkill],
+    cloneCount: getOwnedCloneCount(),
+    dashCharges,
+    dashRechargeUntil: dashRechargeAt,
+  }, now);
   placeWorldLabel(elements.playerSkillLabel, left, y);
 }
 
-function updateBotLabels(bot: TestBot, left: number, y: number) {
-  let labels = botWorldLabels.get(bot.id);
+function updateRunnerLabels(runner: LabelledRunner, left: number, y: number) {
+  let labels = botWorldLabels.get(runner.id);
   if (!labels) {
     const container = document.createElement("div");
     const name = document.createElement("span");
@@ -646,10 +681,13 @@ function updateBotLabels(bot: TestBot, left: number, y: number) {
     container.append(name, skill);
     elements.worldLabelLayer.append(container);
     labels = { container, name, skill };
-    botWorldLabels.set(bot.id, labels);
+    botWorldLabels.set(runner.id, labels);
   }
-  labels.name.textContent = bot.name;
-  labels.skill.textContent = skillLabels[bot.skill].slice(0, 5);
+  labels.name.textContent = runner.name;
+  const status = "skillCooldownUntil" in runner
+    ? { cooldownUntil: runner.skillCooldownUntil, cloneCount: multiplayerActive ? clones.filter((clone) => clone.ownerId === runner.id).length : runner.cloneCount, dashCharges: runner.dashCharges, dashRechargeUntil: runner.dashRechargeUntil }
+    : {};
+  renderSkillLabel(labels.skill, runner.skill, status, performance.now());
   placeWorldLabel(labels.container, left, y);
 }
 
@@ -659,9 +697,27 @@ function resetWorldLabels() {
   botWorldLabels.clear();
 }
 
+function getOwnedCloneCount() {
+  return multiplayerActive ? clones.filter((clone) => clone.ownerId === socket.id).length : clones.length;
+}
+
+function getGrappledPosition(id: string | number | undefined, fallbackX: number, fallbackY: number, now: number) {
+  const effect = grappleEffects.find((candidate) => candidate.targetId !== undefined && candidate.targetId === id && candidate.until > now);
+  if (!effect || effect.targetStartX === undefined || effect.targetStartY === undefined || effect.targetEndX === undefined || effect.targetEndY === undefined) return { x: fallbackX, y: fallbackY };
+  const progress = Math.max(0, Math.min(1, (now - effect.startedAt) / 520));
+  if (progress < .36) return { x: effect.targetStartX, y: effect.targetStartY };
+  const pull = (progress - .36) / .64;
+  const eased = 1 - Math.pow(1 - pull, 2);
+  return {
+    x: effect.targetStartX + (effect.targetEndX - effect.targetStartX) * eased,
+    y: effect.targetStartY + (effect.targetEndY - effect.targetStartY) * eased,
+  };
+}
+
 function drawPlayer(context: CanvasRenderingContext2D, cameraX: number, cameraY: number, time: number) {
-  const baseX = player.x - cameraX;
-  const baseY = player.y - cameraY;
+  const position = getGrappledPosition(multiplayerActive ? socket.id : LOCAL_GRAPPLE_ID, player.x, player.y, time);
+  const baseX = position.x - cameraX;
+  const baseY = position.y - cameraY;
   if (player.fallingUntil > time) {
     elements.playerSkillLabel.classList.add("hidden");
     const progress = Math.max(0, Math.min(1, (time - player.fallingStartedAt) / 520));
@@ -682,9 +738,9 @@ function drawPlayer(context: CanvasRenderingContext2D, cameraX: number, cameraY:
   if (lift > 0) fillRect(context, "rgba(38,31,54,.3)", baseX - 8, baseY + 10, 16, 3);
   drawPerson(context, baseX, drawY, player.direction, player.walking, player.color);
   const statusLeft = Math.round(baseX - 12);
-  drawHealthPips(context, statusLeft, drawY - 18, player.health);
-  drawAmmoPips(context, statusLeft, drawY - 27, player.ammo);
-  updatePlayerSkillLabel(statusLeft, drawY - 27);
+  drawHealthPips(context, statusLeft, drawY - 14, player.health);
+  drawAmmoPips(context, statusLeft, drawY - 21, player.ammo);
+  updatePlayerSkillLabel(statusLeft, drawY - 21);
 }
 
 function drawTitleCloud(context: CanvasRenderingContext2D, x: number, y: number) {
@@ -909,18 +965,19 @@ function getAimVector() {
   return length > 2 ? { x: dx / length, y: dy / length } : { x: fallback[0], y: fallback[1] };
 }
 
-function getPracticeTargetInAim(maxDistance: number, minimumDot = .55) {
+function getPracticeTargetInAim(maxDistance = GRAB_RANGE, hitRadius = GRAB_HIT_RADIUS) {
   const aimVector = getAimVector();
   let candidate: TestBot | undefined;
-  let candidateDistance = Number.POSITIVE_INFINITY;
+  let candidateForwardDistance = Number.POSITIVE_INFINITY;
   for (const bot of testBots) {
     const dx = bot.x - player.x;
     const dy = bot.y - player.y;
-    const distance = Math.hypot(dx, dy);
-    if (distance > maxDistance || distance === 0 || (dx / distance) * aimVector.x + (dy / distance) * aimVector.y < minimumDot) continue;
-    if (distance < candidateDistance) {
+    const forwardDistance = dx * aimVector.x + dy * aimVector.y;
+    const lateralDistance = Math.abs(dx * aimVector.y - dy * aimVector.x);
+    if (forwardDistance <= 0 || forwardDistance > maxDistance || lateralDistance > hitRadius) continue;
+    if (forwardDistance < candidateForwardDistance) {
       candidate = bot;
-      candidateDistance = distance;
+      candidateForwardDistance = forwardDistance;
     }
   }
   return candidate;
@@ -928,7 +985,7 @@ function getPracticeTargetInAim(maxDistance: number, minimumDot = .55) {
 
 function canUseSkill(id: SkillId, now: number) {
   if (id === "dash") return dashCharges > 0 && now >= skillReadyAt.dash;
-  if (id === "clone") return clones.length < 20 && now >= skillReadyAt.clone;
+  if (id === "clone") return getOwnedCloneCount() < CLONE_LIMIT && now >= skillReadyAt.clone;
   return now >= skillReadyAt[id];
 }
 
@@ -945,6 +1002,38 @@ function applySlow(centerX: number, centerY: number, radius: number, now: number
 function useSkill(id: SkillId, now = performance.now()) {
   if (!canUseSkill(id, now) || player.fallingUntil > now) return false;
   const aimVector = getAimVector();
+
+  if (multiplayerActive) {
+    if (id === "dash") {
+      dashCharges -= 1;
+      skillReadyAt.dash = now + 170;
+      player.dashVelocityX = aimVector.x * 280;
+      player.dashVelocityY = aimVector.y * 280;
+      player.dashUntil = now + 165;
+      if (dashCharges === 0) dashRechargeAt = now + 4300;
+    } else if (id === "run") {
+      skillReadyAt.run = now + 9000;
+      runUntil = now + 4600;
+    } else if (id === "push") skillReadyAt.push = now + 2600;
+    else if (id === "grab") {
+      skillReadyAt.grab = now + 3800;
+      grappleLockUntil = now + 520;
+    }
+    else if (id === "clone") skillReadyAt.clone = now + CLONE_COOLDOWN;
+    else if (id === "slow") {
+      skillReadyAt.slow = now + 4600;
+      projectiles.push({ kind: "slow", owner: "player", visualOnly: true, x: player.x, y: player.y - 2, velocityX: aimVector.x * 265, velocityY: aimVector.y * 265, until: now + 760, radius: 72 });
+    } else {
+      skillReadyAt.sleep = now + 2000;
+      projectiles.push({ kind: "sleep", owner: "player", visualOnly: true, x: player.x, y: player.y - 2, velocityX: aimVector.x * 345, velocityY: aimVector.y * 345, until: now + 680, radius: 0 });
+    }
+    aim.pulseX = player.x;
+    aim.pulseY = player.y;
+    aim.pulseUntil = now + 220;
+    socket.emit("combat:skill", { skill: id, dx: aimVector.x, dy: aimVector.y });
+    showToast(`${skillLabels[id]} 사용!`);
+    return true;
+  }
 
   if (id === "push") {
     skillReadyAt.push = now + 2600;
@@ -982,8 +1071,13 @@ function useSkill(id: SkillId, now = performance.now()) {
 
   if (id === "grab") {
     skillReadyAt.grab = now + 3800;
-    const target = getPracticeTargetInAim(180);
+    grappleLockUntil = now + 520;
+    const target = getPracticeTargetInAim();
+    const hookX = target ? target.x : player.x + aimVector.x * GRAB_RANGE;
+    const hookY = target ? target.y : player.y + aimVector.y * GRAB_RANGE;
     if (target) {
+      const targetStartX = target.x;
+      const targetStartY = target.y;
       const pullX = player.x + aimVector.x * 34;
       const pullY = player.y + aimVector.y * 34;
       if (gameMode === "practice") {
@@ -995,9 +1089,33 @@ function useSkill(id: SkillId, now = performance.now()) {
       }
       target.knockbackX = 0;
       target.knockbackY = 0;
+      grappleEffects.splice(0, grappleEffects.length, ...grappleEffects.filter((effect) => effect.targetId !== target.id));
+      grappleEffects.push({
+        sourceId: LOCAL_GRAPPLE_ID,
+        targetId: target.id,
+        sourceX: player.x,
+        sourceY: player.y,
+        hookX,
+        hookY,
+        targetStartX,
+        targetStartY,
+        targetEndX: target.x,
+        targetEndY: target.y,
+        startedAt: now,
+        until: now + 520,
+      });
       showToast(`${target.name}을(를) 앞으로 끌어왔다!`);
     } else {
-      showToast("그랩 사거리 안에 조준한 대상이 없다.");
+      grappleEffects.push({
+        sourceId: LOCAL_GRAPPLE_ID,
+        sourceX: player.x,
+        sourceY: player.y,
+        hookX,
+        hookY,
+        startedAt: now,
+        until: now + 520,
+      });
+      showToast("그랩 발사! 조준선에 맞은 대상이 없다.");
     }
   }
 
@@ -1022,9 +1140,11 @@ function useSkill(id: SkillId, now = performance.now()) {
         return false;
       }
     }
-    skillReadyAt.clone = now + 1100;
-    clones.push({ x: spawnX, y: spawnY, direction: player.direction, until: now + 9500 });
-    showToast(`분신 배치! (${clones.length}/20)`);
+    skillReadyAt.clone = now + CLONE_COOLDOWN;
+    const clone = { x: spawnX, y: spawnY, direction: player.direction, until: now + CLONE_DURATION };
+    clones.push(clone);
+    for (const bot of testBots) nudgeBotFromNewClone(bot, clone, aimVector.x, aimVector.y);
+    showToast(`분신 배치! (${clones.length}/${CLONE_LIMIT})`);
   }
 
   if (id === "slow") {
@@ -1074,6 +1194,7 @@ function fireBasicShot(now: number) {
   player.ammo -= 1;
   player.shotReadyAt = now + 210;
   projectiles.push({ kind: "bullet", owner: "player", x: player.x + aimVector.x * 8, y: player.y + aimVector.y * 2, velocityX: aimVector.x * 430, velocityY: aimVector.y * 430, until: now + 620, radius: 0 });
+  if (multiplayerActive) socket.emit("combat:shoot", { dx: aimVector.x, dy: aimVector.y });
 }
 
 function respawnBot(bot: TestBot, now: number) {
@@ -1125,6 +1246,25 @@ function canBotStand(bot: TestBot, x: number, y: number) {
   }
   if (x - 6 < PRACTICE_ARENA.left || x + 6 > PRACTICE_ARENA.right || y - 6 < PRACTICE_ARENA.top || y + 8 > PRACTICE_ARENA.bottom) return false;
   return !clones.some((clone) => Math.abs(x - clone.x) < 13 && Math.abs(y - clone.y) < 14);
+}
+
+function nudgeBotFromNewClone(bot: TestBot, clone: Clone, fallbackX: number, fallbackY: number) {
+  const deltaX = bot.x - clone.x;
+  const deltaY = bot.y - clone.y;
+  if (Math.abs(deltaX) >= 13 || Math.abs(deltaY) >= 14) return;
+  const length = Math.hypot(deltaX, deltaY);
+  const directionX = length > .01 ? deltaX / length : fallbackX;
+  const directionY = length > .01 ? deltaY / length : fallbackY;
+  for (let distance = 20; distance <= 48; distance += 4) {
+    const x = clone.x + directionX * distance;
+    const y = clone.y + directionY * distance;
+    if (!canBotStand(bot, x, y)) continue;
+    bot.x = x;
+    bot.y = y;
+    bot.knockbackX = 0;
+    bot.knockbackY = 0;
+    return;
+  }
 }
 
 function updatePracticeBots(now: number, dt: number) {
@@ -1223,6 +1363,10 @@ function updateProjectiles(now: number, dt: number) {
       ? projectile.x < PRACTICE_ARENA.left || projectile.x > PRACTICE_ARENA.right || projectile.y < PRACTICE_ARENA.top || projectile.y > PRACTICE_ARENA.bottom
       : projectile.x < 0 || projectile.x > WORLD_WIDTH || projectile.y < 0 || projectile.y > WORLD_HEIGHT;
     const expired = now >= projectile.until || outside;
+    if (projectile.visualOnly) {
+      if (expired) projectiles.splice(index, 1);
+      continue;
+    }
     if (!target && !playerHit && !expired) continue;
     if (projectile.kind === "bullet" && target) damageBot(target, now);
     if (projectile.kind === "bullet" && playerHit) damagePlayer(now);
@@ -1379,6 +1523,7 @@ function updatePlayer(dt: number, now: number) {
     respawnAtCheckpoint("마지막 체크포인트에서 다시 달린다!", now);
     return;
   }
+  if ((multiplayerActive && networkSleepUntil > now) || grappleLockUntil > now) return;
   if (player.dashUntil > now) {
     movePlayer(player.dashVelocityX * dt, player.dashVelocityY * dt);
     player.walking += dt * 24;
@@ -1394,7 +1539,8 @@ function updatePlayer(dt: number, now: number) {
     if (Math.abs(horizontal) > Math.abs(vertical)) player.direction = horizontal < 0 ? "left" : "right";
     else player.direction = vertical < 0 ? "up" : "down";
     const runMultiplier = runUntil > now ? 1.68 : 1;
-    movePlayer(horizontal * 110 * runMultiplier * dt, vertical * 110 * runMultiplier * dt);
+    const slowMultiplier = multiplayerActive && networkSlowUntil > now ? .55 : 1;
+    movePlayer(horizontal * 110 * runMultiplier * slowMultiplier * dt, vertical * 110 * runMultiplier * slowMultiplier * dt);
     player.walking += dt * 12;
   }
 
@@ -1407,9 +1553,15 @@ function updatePlayer(dt: number, now: number) {
 }
 
 function getCamera() {
+  const position = getGrappledPosition(
+    multiplayerActive ? socket.id : LOCAL_GRAPPLE_ID,
+    player.x,
+    player.y,
+    performance.now(),
+  );
   return {
-    x: Math.max(0, Math.min(WORLD_WIDTH - VIEW_WIDTH, player.x - VIEW_WIDTH / 2)),
-    y: Math.max(0, Math.min(WORLD_HEIGHT - VIEW_HEIGHT, player.y - VIEW_HEIGHT / 2)),
+    x: Math.max(0, Math.min(WORLD_WIDTH - VIEW_WIDTH, position.x - VIEW_WIDTH / 2)),
+    y: Math.max(0, Math.min(WORLD_HEIGHT - VIEW_HEIGHT, position.y - VIEW_HEIGHT / 2)),
   };
 }
 
@@ -1481,12 +1633,13 @@ function drawPracticeFloor(context: CanvasRenderingContext2D, cameraX: number, c
 }
 
 function drawTestBot(context: CanvasRenderingContext2D, bot: TestBot, cameraX: number, cameraY: number, time: number) {
-  const x = bot.x - cameraX;
-  const y = bot.y - cameraY;
+  const position = getGrappledPosition(bot.id, bot.x, bot.y, time);
+  const x = position.x - cameraX;
+  const y = position.y - cameraY;
   drawPerson(context, x, y, bot.direction, bot.walking, bot.color, true);
   const statusLeft = Math.round(x - 12);
-  drawHealthPips(context, statusLeft, y - 23, bot.health);
-  updateBotLabels(bot, statusLeft, y - 23);
+  drawHealthPips(context, statusLeft, y - 14, bot.health);
+  updateRunnerLabels(bot, statusLeft, y - 14);
   if (bot.slowUntil > time) {
     fillRect(context, "#76d7e7", x - 7, y - 9, 14, 2);
     fillRect(context, "#76d7e7", x - 7, y + 12, 14, 2);
@@ -1495,6 +1648,49 @@ function drawTestBot(context: CanvasRenderingContext2D, bot: TestBot, cameraX: n
     context.fillStyle = "#e5b8f4";
     context.font = "bold 8px monospace";
     context.fillText("Z", Math.round(x + 7), Math.round(y - 10));
+  }
+}
+
+function drawRemotePlayer(context: CanvasRenderingContext2D, runner: RemotePlayer, cameraX: number, cameraY: number, time: number) {
+  const position = getGrappledPosition(runner.id, runner.x, runner.y, time);
+  const x = position.x - cameraX;
+  const y = position.y - cameraY;
+  drawPerson(context, x, y, runner.direction, runner.walking, runner.color, true);
+  const statusLeft = Math.round(x - 12);
+  drawHealthPips(context, statusLeft, y - 14, runner.health);
+  updateRunnerLabels(runner, statusLeft, y - 14);
+}
+
+function drawGrappleEffects(context: CanvasRenderingContext2D, cameraX: number, cameraY: number, now: number) {
+  for (let index = grappleEffects.length - 1; index >= 0; index -= 1) {
+    const effect = grappleEffects[index];
+    if (effect.until <= now) {
+      grappleEffects.splice(index, 1);
+      continue;
+    }
+    const progress = Math.max(0, Math.min(1, (now - effect.startedAt) / 520));
+    const returnPhase = progress >= .36;
+    const phase = returnPhase ? (progress - .36) / .64 : progress / .36;
+    const tipX = returnPhase
+      ? effect.hookX + (effect.sourceX - effect.hookX) * phase
+      : effect.sourceX + (effect.hookX - effect.sourceX) * phase;
+    const tipY = returnPhase
+      ? effect.hookY + (effect.sourceY - effect.hookY) * phase
+      : effect.sourceY + (effect.hookY - effect.sourceY) * phase;
+    const distance = Math.hypot(tipX - effect.sourceX, tipY - effect.sourceY);
+    const steps = Math.max(1, Math.ceil(distance / 5));
+    for (let step = 0; step <= steps; step += 1) {
+      const ratio = step / steps;
+      const armX = effect.sourceX + (tipX - effect.sourceX) * ratio - cameraX;
+      const armY = effect.sourceY + (tipY - effect.sourceY) * ratio - cameraY;
+      fillRect(context, step % 2 ? "#97b4c0" : "#485b73", armX - 1, armY - 1, 3, 3);
+    }
+    const handX = tipX - cameraX;
+    const handY = tipY - cameraY;
+    fillRect(context, "#202d45", handX - 6, handY - 5, 12, 10);
+    fillRect(context, "#8faeb8", handX - 4, handY - 4, 8, 7);
+    fillRect(context, "#d4eef0", handX - 2, handY - 3, 4, 2);
+    fillRect(context, "#f0b95b", handX + 3, handY - 1, 4, 3);
   }
 }
 
@@ -1538,7 +1734,7 @@ function updateSkillBar(now: number) {
   const markup = ids.map((id, index) => {
     const remaining = Math.max(0, skillReadyAt[id] - now);
     const active = id === "run" && runUntil > now;
-    const status = id === "dash" ? (dashCharges > 0 ? `${dashCharges}/3` : `${Math.ceil(Math.max(0, dashRechargeAt - now) / 1000)}s`) : id === "clone" ? `${clones.length}/20` : active ? "RUN!" : remaining > 0 ? `${Math.ceil(remaining / 1000)}s` : "READY";
+    const status = id === "dash" ? (dashCharges > 0 ? `${dashCharges}/3` : `${Math.ceil(Math.max(0, dashRechargeAt - now) / 1000)}s`) : id === "clone" ? `${getOwnedCloneCount()}/${CLONE_LIMIT}` : active ? "RUN!" : remaining > 0 ? `${Math.ceil(remaining / 1000)}s` : "READY";
     const unavailable = !canUseSkill(id, now);
     return `<span class="skill-chip${unavailable ? " cooldown" : ""}${active ? " active" : ""}"><b>${index + 1}. ${skillLabels[id]}</b>${status}</span>`;
   }).join("") + `<span class="skill-chip"><b>R. 랜덤</b>ROLL</span>`;
@@ -1591,6 +1787,7 @@ function drawPractice(context: CanvasRenderingContext2D, time: number) {
   }
   if (!playerDrawn) drawPlayer(context, cameraX, cameraY, time);
   for (const projectile of projectiles) drawProjectile(context, projectile, cameraX, cameraY);
+  drawGrappleEffects(context, cameraX, cameraY, time);
   drawAimGuide(context, cameraX, cameraY, time);
   fillRect(context, "rgba(34,26,57,.28)", 0, 0, VIEW_WIDTH, 3);
   fillRect(context, "rgba(34,26,57,.28)", 0, VIEW_HEIGHT - 3, VIEW_WIDTH, 3);
@@ -1623,8 +1820,10 @@ function drawTown(context: CanvasRenderingContext2D, time: number) {
   if (!playerDrawn) drawPlayer(context, cameraX, cameraY, time);
 
   for (const bot of testBots) drawTestBot(context, bot, cameraX, cameraY, time);
+  for (const runner of remotePlayers.values()) drawRemotePlayer(context, runner, cameraX, cameraY, time);
   for (const clone of clones) drawClone(context, clone, cameraX, cameraY, time);
   for (const projectile of projectiles) drawProjectile(context, projectile, cameraX, cameraY);
+  drawGrappleEffects(context, cameraX, cameraY, time);
 
   for (const spinner of spinners) drawSpinner(context, spinner, cameraX, cameraY);
   drawAimGuide(context, cameraX, cameraY, time);
@@ -2025,14 +2224,33 @@ function resetSkillPractice(now: number) {
   resetWorldLabels();
   clones.length = 0;
   projectiles.length = 0;
-  const opponents = [
-    { x: 354, y: 338, color: "#f4c562", name: "테스터 노랑" },
-    { x: 544, y: 338, color: "#78d8e9", name: "테스터 파랑" },
-    { x: 345, y: 445, color: "#a985e6", name: "테스터 보라" },
-    { x: 555, y: 445, color: "#e58fba", name: "테스터 분홍" },
-  ];
-  const practiceSkills: SkillId[] = ["push", "dash", "run", "grab", "clone", "slow", "sleep"];
-  opponents.forEach((opponent, index) => testBots.push({ ...opponent, id: index + 1, skill: practiceSkills[index % practiceSkills.length], direction: "down", walking: index, moveX: 0, moveY: 0, nextTurnAt: now + index * 190, knockbackX: 0, knockbackY: 0, slowUntil: 0, sleepUntil: 0, health: 5, lap: 0, checkpoint: 0, routeIndex: 0, shotReadyAt: 0 }));
+  grappleEffects.length = 0;
+  if (skillTestRoomActive) {
+    const targets = [
+      { x: 354, y: 338, color: "#f4c562", name: "더미 노랑", skill: "push" as SkillId },
+      { x: 544, y: 338, color: "#78d8e9", name: "더미 파랑", skill: "dash" as SkillId },
+      { x: 345, y: 445, color: "#a985e6", name: "더미 보라", skill: "grab" as SkillId },
+      { x: 555, y: 445, color: "#e58fba", name: "더미 분홍", skill: "sleep" as SkillId },
+    ];
+    targets.forEach((target, index) => testBots.push({
+      ...target,
+      id: index + 1,
+      direction: "down",
+      walking: index,
+      moveX: 0,
+      moveY: 0,
+      nextTurnAt: Number.POSITIVE_INFINITY,
+      knockbackX: 0,
+      knockbackY: 0,
+      slowUntil: 0,
+      sleepUntil: 0,
+      health: 5,
+      lap: 0,
+      checkpoint: 0,
+      routeIndex: 0,
+      shotReadyAt: Number.POSITIVE_INFINITY,
+    }));
+  }
   (Object.keys(skillReadyAt) as SkillId[]).forEach((id) => { skillReadyAt[id] = 0; });
   dashCharges = 3;
   dashRechargeAt = 0;
@@ -2055,12 +2273,13 @@ function enterPractice() {
   player.dashUntil = 0;
   runUntil = 0;
   resetSkillPractice(now);
-  elements.practice.textContent = "운동장으로 돌아가기";
+  elements.practice.textContent = skillTestRoomActive ? "로비로 돌아가기" : "운동장으로 돌아가기";
   updateObjective();
-  showToast("스킬 연습장 입장! 숫자 1~7 또는 R을 눌러 테스트하세요.");
+  showToast(skillTestRoomActive ? "스킬 테스트 방 입장! 더미에게 자유롭게 사용해보세요." : "스킬 연습장 입장! 숫자 1~7 또는 R을 눌러 테스트하세요.");
 }
 
 function returnToTrack() {
+  skillTestRoomActive = false;
   gameMode = "track";
   player.x = START_POINT.x;
   player.y = START_POINT.y;
@@ -2080,11 +2299,26 @@ function returnToTrack() {
 
 function togglePractice() {
   if (!gameActive) return;
+  if (multiplayerActive) {
+    showToast("멀티 레이스 중에는 연습장으로 이동할 수 없어요.");
+    return;
+  }
+  if (gameMode === "practice" && skillTestRoomActive) returnToLobby();
   if (gameMode === "practice") returnToTrack();
   else enterPractice();
 }
 
 function returnToLobby() {
+  if (activeNetworkRoom) socket.emit("room:leave");
+  activeNetworkRoom = undefined;
+  multiplayerActive = false;
+  remotePlayers.clear();
+  networkSleepUntil = 0;
+  networkSlowUntil = 0;
+  grappleLockUntil = 0;
+  grappleEffects.length = 0;
+  skillTestRoomActive = false;
+  resetWorldLabels();
   gameActive = false;
   aim.visible = false;
   pressedKeys.clear();
@@ -2249,6 +2483,35 @@ elements.back.addEventListener("click", returnToLobby);
 elements.practice.addEventListener("click", togglePractice);
 elements.fullscreen.addEventListener("click", () => { void toggleFullscreen(); });
 
+socket.on("room:state", (room: NetworkRoom) => applyNetworkRoom(room));
+socket.on("match:started", (room: NetworkRoom) => startNetworkMatch(room));
+socket.on("player:state", (runner: NetworkPlayer) => {
+  if (!multiplayerActive || runner.id === socket.id) return;
+  upsertRemotePlayer(runner);
+});
+socket.on("combat:shot", (shot: { sourceId: string; x: number; y: number; dx: number; dy: number }) => {
+  if (!multiplayerActive || shot.sourceId === socket.id) return;
+  projectiles.push({ kind: "bullet", owner: "remote", sourceId: shot.sourceId, x: shot.x, y: shot.y, velocityX: shot.dx * 430, velocityY: shot.dy * 430, until: performance.now() + 620, radius: 0 });
+});
+socket.on("combat:grapple", (grapple: Omit<GrappleEffect, "startedAt" | "until">) => {
+  if (!multiplayerActive) return;
+  const now = performance.now();
+  if (grapple.targetId !== undefined) grappleEffects.splice(0, grappleEffects.length, ...grappleEffects.filter((effect) => effect.targetId !== grapple.targetId));
+  grappleEffects.push({ ...grapple, startedAt: now, until: now + 520 });
+  if (grapple.sourceId === socket.id || grapple.targetId === socket.id) grappleLockUntil = now + 520;
+});
+socket.on("combat:effect", (effect: { kind: "bullet" | SkillId; sourceId: string; targetIds: string[]; duration?: number; defeated?: boolean }) => {
+  if (!multiplayerActive) return;
+  const hitMe = socket.id ? effect.targetIds.includes(socket.id) : false;
+  if (hitMe && effect.kind === "sleep") networkSleepUntil = performance.now() + (effect.duration ?? 2000);
+  if (hitMe && effect.kind === "slow") networkSlowUntil = performance.now() + (effect.duration ?? 3600);
+  if (effect.kind === "bullet" && hitMe) showToast(effect.defeated ? "처치당했습니다! 체크포인트에서 부활." : "총알에 맞았다!");
+  if (effect.sourceId === socket.id && effect.targetIds.length > 0) showToast(`${skillLabels[effect.kind as SkillId] ?? "총알"} 명중!`);
+});
+socket.on("disconnect", () => {
+  if (multiplayerActive) showToast("서버 연결이 끊겼습니다. 로비로 돌아가 다시 연결하세요.");
+});
+
 function updateAimFromPointer(event: PointerEvent) {
   const bounds = elements.gameCanvas.getBoundingClientRect();
   aim.screenX = Math.max(0, Math.min(VIEW_WIDTH, (event.clientX - bounds.left) * VIEW_WIDTH / bounds.width));
@@ -2269,9 +2532,6 @@ elements.gameCanvas.addEventListener("pointerdown", (event) => {
   const now = performance.now();
   if (event.button === 0) {
     fireBasicShot(now);
-    aim.pulseX = aim.worldX;
-    aim.pulseY = aim.worldY;
-    aim.pulseUntil = now + 180;
   } else if (gameMode === "track") useSkill(equippedSkill, now);
   else useRandomSkill(now);
   elements.gameCanvas.focus();
