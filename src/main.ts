@@ -1,115 +1,63 @@
 import titleKeyArt from "./assets/title-keyart-pixel-v3.png";
 import { io } from "socket.io-client";
+import {
+  CHECKPOINTS,
+  CLONE_COOLDOWN,
+  CLONE_DURATION,
+  CLONE_LIMIT,
+  DASH_RECHARGE_DURATION,
+  FIRST_PIT_WARNING_DELAY,
+  GRAB_HIT_RADIUS,
+  GRAB_RANGE,
+  JUMP_PADS,
+  PIT_CYCLE_MIN_DELAY,
+  PIT_CYCLE_RANDOM_DELAY,
+  PIT_WARNING_DURATION,
+  PIT_ZONES,
+  PLAYER_BASE_SPEED,
+  RESPAWN_POINTS,
+  RUN_DURATION,
+  RUN_SPEED_MULTIPLIER,
+  SLOW_SPEED_MULTIPLIER,
+  SPINNER_RULES,
+  START_GATE,
+  START_POINT,
+  TRACK,
+  WORLD_HEIGHT,
+  WORLD_WIDTH,
+  type SkillId,
+} from "../shared/game-rules.mjs";
+import { insideRect, isTrackPoint, pointSegmentDistance } from "../shared/geometry.mjs";
+import type {
+  AimState,
+  Clone,
+  Direction,
+  GameMode,
+  GrappleEffect,
+  HazardEffect,
+  LabelledRunner,
+  NetworkClone,
+  NetworkHazards,
+  NetworkPlayer,
+  NetworkResponse,
+  NetworkRoom,
+  Pit,
+  Player,
+  Projectile,
+  PropKind,
+  PushEffect,
+  RemotePlayer,
+  RoomConfig,
+  SlowImpact,
+  Spinner,
+  TestBot,
+  WorldProp,
+} from "./game/types";
 import "./style.css";
 
 const VIEW_WIDTH = 384;
 const VIEW_HEIGHT = 216;
-const GRAB_RANGE = 250;
-const GRAB_HIT_RADIUS = 12;
-const CLONE_LIMIT = 20;
-const CLONE_COOLDOWN = 150;
-const CLONE_DURATION = 10_000;
 const TILE = 16;
-const MAP_WIDTH = 84;
-const MAP_HEIGHT = 63;
-const WORLD_WIDTH = MAP_WIDTH * TILE;
-const WORLD_HEIGHT = MAP_HEIGHT * TILE;
-
-type Direction = "down" | "up" | "left" | "right";
-type PropKind = "vending" | "bench" | "crate" | "plant" | "table" | "lamp" | "sofa" | "mailbox" | "arcade";
-
-type WorldProp = {
-  kind: PropKind;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  solid?: boolean;
-};
-
-type Player = {
-  x: number;
-  y: number;
-  direction: Direction;
-  walking: number;
-  name: string;
-  color: string;
-  knockbackX: number;
-  knockbackY: number;
-  hitUntil: number;
-  fallingUntil: number;
-  fallingStartedAt: number;
-  fallTargetX: number;
-  fallTargetY: number;
-  airUntil: number;
-  airStartedAt: number;
-  dashUntil: number;
-  dashVelocityX: number;
-  dashVelocityY: number;
-  health: number;
-  ammo: number;
-  shotReadyAt: number;
-};
-
-type Spinner = { x: number; y: number; radius: number; angle: number; speed: number };
-type Pit = { x: number; y: number; width: number; height: number; active: boolean; warning?: boolean };
-type AimState = { screenX: number; screenY: number; worldX: number; worldY: number; visible: boolean; pulseUntil: number; pulseX: number; pulseY: number };
-type GameMode = "track" | "practice";
-type SkillId = "push" | "dash" | "run" | "grab" | "clone" | "slow" | "sleep";
-type TestBot = { id: number; x: number; y: number; direction: Direction; walking: number; color: string; name: string; skill: SkillId; moveX: number; moveY: number; nextTurnAt: number; knockbackX: number; knockbackY: number; slowUntil: number; sleepUntil: number; health: number; lap: number; checkpoint: number; routeIndex: number; shotReadyAt: number };
-type Clone = { x: number; y: number; direction: Direction; until: number; ownerId?: string };
-type Projectile = { kind: "slow" | "sleep" | "bullet"; owner: "player" | "bot" | "remote"; sourceId?: string | number; x: number; y: number; velocityX: number; velocityY: number; until: number; radius: number; visualOnly?: boolean };
-type RoomConfig = { lapLimit: number; playerCount: number; enabledSkills: SkillId[] };
-type NetworkPlayer = {
-  id: string;
-  name: string;
-  color: string;
-  x: number;
-  y: number;
-  direction: Direction;
-  walking: number;
-  health: number;
-  ammo: number;
-  skill: SkillId;
-  lap: number;
-  checkpoint: number;
-  skillCooldownMs?: number;
-  cloneCount?: number;
-  dashCharges?: number;
-  dashRechargeMs?: number;
-  fallingMs?: number;
-  fallingElapsedMs?: number;
-  fallTargetX?: number;
-  fallTargetY?: number;
-  airMs?: number;
-  airElapsedMs?: number;
-};
-type NetworkClone = { id: string; ownerId: string; x: number; y: number; direction: Direction; until: number };
-type NetworkHazards = { activePitIndex: number; warningPitIndex: number; warningMs: number; nextPitMs: number };
-type RemotePlayer = NetworkPlayer & {
-  targetX: number;
-  targetY: number;
-  targetWalking: number;
-  skillCooldownUntil: number;
-  dashRechargeUntil: number;
-  fallingStartedAt: number;
-  fallingUntil: number;
-  fallTargetX: number;
-  fallTargetY: number;
-  airStartedAt: number;
-  airUntil: number;
-  slowEffectUntil: number;
-};
-type NetworkRoom = { code: string; hostId: string; config: RoomConfig; started: boolean; finished: boolean; winner: { id: string; name: string } | null; hazards: NetworkHazards; players: NetworkPlayer[]; clones: NetworkClone[] };
-type NetworkResponse = { ok: true; room: NetworkRoom } | { ok: false; error: string };
-type LabelledRunner = Pick<TestBot, "id" | "name" | "skill"> | Pick<RemotePlayer, "id" | "name" | "skill" | "skillCooldownUntil" | "cloneCount" | "dashCharges" | "dashRechargeUntil">;
-type GrappleEffect = { sourceId: string | number; targetId?: string | number; sourceX: number; sourceY: number; hookX: number; hookY: number; targetStartX?: number; targetStartY?: number; targetEndX?: number; targetEndY?: number; startedAt: number; until: number };
-type PushEffect = { sourceId: string; targetId: string; startX: number; startY: number; endX: number; endY: number; duration: number; startedAt: number; until: number };
-type SlowImpact = { x: number; y: number; startedAt: number; until: number };
-type HazardEffect =
-  | { kind: "pit"; playerId: string; duration: number; targetX: number; targetY: number }
-  | { kind: "jump"; playerId: string; duration: number; pushX: number; pushY: number }
-  | { kind: "respawn"; playerId: string; x: number; y: number; ammo: number };
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("앱을 찾을 수 없어요.");
@@ -118,7 +66,7 @@ app.innerHTML = `
   <div class="pixel-shell">
     <main id="title-screen" class="title-screen" aria-labelledby="title-logo">
       <div class="title-stage">
-        <img class="title-keyart" src="${titleKeyArt}" alt="총을 든 러너와 복제 러너들이 운동장을 질주하는 픽셀 키비주얼" />
+        <img id="title-keyart" class="title-keyart" src="${titleKeyArt}" alt="총을 든 러너와 복제 러너들이 운동장을 질주하는 픽셀 키비주얼" />
         <canvas id="title-canvas" width="384" height="216" aria-hidden="true"></canvas>
         <div class="scanlines" aria-hidden="true"></div>
         <div class="title-logo">
@@ -131,14 +79,16 @@ app.innerHTML = `
         </div>
         <section id="title-room-panel" class="title-room-panel hidden" aria-label="방 설정">
           <div class="title-panel-heading"><span id="title-panel-marker">ROOM MENU</span><b id="title-panel-title">방 참여하기</b></div>
+          <div class="title-name-field">
+            <label for="title-runner-name">러너 이름</label>
+            <input id="title-runner-name" maxlength="10" value="말썽꾸러기" autocomplete="nickname" />
+          </div>
           <div class="title-join-fields">
             <label for="title-room-code">방 번호</label>
             <input id="title-room-code" maxlength="12" placeholder="예: PM-7F2A" autocomplete="off" />
             <p>초대 받은 방 번호를 입력하세요. <b>test</b>는 멀티 테스트, <b>test-skill</b>은 스킬 연습장입니다.</p>
           </div>
           <div class="title-create-fields">
-            <label for="title-runner-name">러너 이름</label>
-            <input id="title-runner-name" maxlength="10" value="말썽꾸러기" autocomplete="nickname" />
             <div class="title-config-grid"><label for="title-lap-count">목표 랩 <input id="title-lap-count" type="number" min="1" max="999" step="1" value="5" /></label><label for="title-player-count">인원 <input id="title-player-count" type="number" min="2" max="6" step="1" value="4" /></label></div>
             <label for="title-invite-code">초대 코드</label>
             <input id="title-invite-code" maxlength="12" value="PM-7F2A" autocomplete="off" />
@@ -150,46 +100,6 @@ app.innerHTML = `
           <div class="title-panel-actions"><button id="title-confirm-room" class="title-panel-confirm" type="button">방 참여</button><button id="title-panel-back" class="title-panel-back" type="button">뒤로</button></div>
         </section>
         <div class="title-caption">2–6 PLAYERS · RANDOM SKILLS · TOTAL MAYHEM</div>
-      </div>
-    </main>
-
-    <main id="lobby-screen" class="lobby-screen hidden" aria-labelledby="game-title">
-      <div class="lobby-stage">
-        <canvas id="lobby-canvas" width="384" height="216" aria-label="픽셀 대기실 배경"></canvas>
-        <div class="scanlines" aria-hidden="true"></div>
-        <header class="lobby-topbar">
-          <a class="brand" href="#top" aria-label="픽셀 패닉 런 대기실"><span class="brand-icon">!</span><span>PIXEL<br />PANIC RUN</span></a>
-          <div class="lobby-mode">ONLINE LOBBY <span class="blink">● LOCAL TEST</span></div>
-        </header>
-
-        <section class="lobby-window room-browser" aria-label="방 목록">
-          <div class="window-title"><span class="window-dot green"></span><span>OPEN ROOMS</span><b>1 FOUND</b></div>
-          <h1 id="game-title">픽셀 패닉 <em>마라톤</em></h1>
-          <p class="lobby-copy">방을 골라 난입하거나, 규칙을 정해 직접 말썽판을 여세요.</p>
-          <div class="room-row">
-            <span class="room-status blink">●</span>
-            <div><b>말썽 운동장 공개방</b><small>5 LAP · 4 / 6 · ALL SKILLS</small></div>
-            <button id="join-local-room" class="join-button">참여하기</button>
-          </div>
-          <p class="room-hint">현재는 로컬 봇 레이스로 방 흐름을 검증합니다.</p>
-        </section>
-
-        <section class="pixel-panel start-panel" aria-label="방 만들기 설정">
-          <div class="window-title"><span class="window-dot yellow"></span><span>CREATE ROOM</span><b>HOST</b></div>
-          <label for="runner-name">러너 이름</label>
-          <div class="entry-row"><input id="runner-name" maxlength="10" value="말썽꾸러기" autocomplete="nickname" /><button id="enter-town">방 만들기</button></div>
-          <div class="room-settings" aria-label="방 설정">
-            <label for="lap-count">목표 랩 <b>1~999</b></label>
-            <div class="setting-grid"><input id="lap-count" type="number" min="1" max="999" step="1" value="5" /><label for="player-count">인원</label><input id="player-count" type="number" min="2" max="6" step="1" value="4" /></div>
-            <span class="setting-title">사용 스킬 (최소 3개)</span>
-            <div id="skill-pool" class="skill-options">
-              <label><input type="checkbox" value="push" checked /> 밀치기</label><label><input type="checkbox" value="dash" checked /> 돌진</label><label><input type="checkbox" value="run" checked /> 질주</label><label><input type="checkbox" value="grab" checked /> 그랩</label><label><input type="checkbox" value="clone" checked /> 분신</label><label><input type="checkbox" value="slow" checked /> 슬로우탄</label><label><input type="checkbox" value="sleep" checked /> 수면총</label>
-            </div>
-          </div>
-          <p class="panel-note">기본 5랩 · 좌클릭 총 3발 · 우클릭 랜덤 스킬 1개</p>
-        </section>
-
-        <footer class="lobby-footer"><span>WASD · MOUSE · SOCIAL SABOTAGE</span><span>BUILD 0.2 / LOCAL</span></footer>
       </div>
     </main>
 
@@ -235,8 +145,8 @@ function getElement<T extends HTMLElement>(selector: string) {
 
 const elements = {
   title: getElement<HTMLElement>("#title-screen"),
-  lobby: getElement<HTMLElement>("#lobby-screen"),
   game: getElement<HTMLElement>("#game-screen"),
+  titleKeyArt: getElement<HTMLImageElement>("#title-keyart"),
   titleCanvas: getElement<HTMLCanvasElement>("#title-canvas"),
   openJoin: getElement<HTMLButtonElement>("#open-join"),
   openCreate: getElement<HTMLButtonElement>("#open-create"),
@@ -252,11 +162,7 @@ const elements = {
   titleSkillPool: getElement<HTMLElement>("#title-skill-pool"),
   titleConfirm: getElement<HTMLButtonElement>("#title-confirm-room"),
   titlePanelBack: getElement<HTMLButtonElement>("#title-panel-back"),
-  name: getElement<HTMLInputElement>("#runner-name"),
-  enter: getElement<HTMLButtonElement>("#enter-town"),
-  join: getElement<HTMLButtonElement>("#join-local-room"),
   back: getElement<HTMLButtonElement>("#back-to-lobby"),
-  lobbyCanvas: getElement<HTMLCanvasElement>("#lobby-canvas"),
   gameCanvas: getElement<HTMLCanvasElement>("#game-canvas"),
   gameFrame: getElement<HTMLElement>("#game-frame"),
   worldLabelLayer: getElement<HTMLElement>("#world-label-layer"),
@@ -268,9 +174,6 @@ const elements = {
   objective: getElement<HTMLElement>("#objective-value"),
   skillBar: getElement<HTMLElement>("#skill-bar"),
   practice: getElement<HTMLButtonElement>("#practice-button"),
-  lapCount: getElement<HTMLInputElement>("#lap-count"),
-  playerCount: getElement<HTMLInputElement>("#player-count"),
-  skillPool: getElement<HTMLElement>("#skill-pool"),
   toast: getElement<HTMLElement>("#toast"),
 };
 
@@ -281,21 +184,11 @@ function getPixelContext(canvas: HTMLCanvasElement) {
 }
 
 const titleContext = getPixelContext(elements.titleCanvas);
-const lobbyContext = getPixelContext(elements.lobbyCanvas);
 const gameContext = getPixelContext(elements.gameCanvas);
 titleContext.imageSmoothingEnabled = false;
-lobbyContext.imageSmoothingEnabled = false;
 gameContext.imageSmoothingEnabled = false;
 
 // 기존 트랙보다 직선 구간을 50% 늘려, 한 바퀴 주행 거리를 약 1.5배로 확장한다.
-const TRACK = { outerLeft: 32, outerTop: 32, outerRight: 1280, outerBottom: 944, innerLeft: 208, innerTop: 192, innerRight: 1104, innerBottom: 784 };
-const START_POINT = { x: 128, y: 856 };
-const RESPAWN_POINTS = [
-  START_POINT,
-  { x: 1152, y: 856 },
-  { x: 1152, y: 120 },
-  { x: 128, y: 120 },
-];
 const props: WorldProp[] = [
   { kind: "bench", x: -10, y: 103, width: 39, height: 16, solid: true },
   { kind: "vending", x: 2, y: 157, width: 28, height: 36, solid: true },
@@ -313,23 +206,10 @@ const props: WorldProp[] = [
   { kind: "lamp", x: 144, y: 944, width: 16, height: 30 },
   { kind: "lamp", x: 1068, y: 944, width: 16, height: 30 },
 ];
-const spinners: Spinner[] = [
-  { x: 650, y: 856, radius: 52, angle: 0, speed: 2.15 },
-  { x: 1190, y: 492, radius: 48, angle: Math.PI * .5, speed: -2.8 },
-  { x: 660, y: 112, radius: 48, angle: Math.PI * .2, speed: 3.1 },
-];
-const pits: Pit[] = [
-  { x: 260, y: 836, width: 34, height: 36, active: false },
-  { x: 1168, y: 350, width: 34, height: 31, active: false },
-  { x: 115, y: 510, width: 34, height: 31, active: false },
-  { x: 840, y: 88, width: 34, height: 34, active: false },
-];
-const jumpPads = [{ x: 920, y: 836, width: 40, height: 30, pushX: -320, pushY: 0 }];
-const checkpoints = [
-  { x: 1120, y: 816, width: 72, height: 74, spawnX: 1152, spawnY: 856 },
-  { x: 1120, y: 80, width: 72, height: 74, spawnX: 1152, spawnY: 120 },
-  { x: 105, y: 80, width: 72, height: 74, spawnX: 128, spawnY: 120 },
-];
+const spinners: Spinner[] = SPINNER_RULES.map((spinner) => ({ ...spinner, angle: 0 }));
+const pits: Pit[] = PIT_ZONES.map((pit) => ({ ...pit, active: false }));
+const jumpPads = JUMP_PADS;
+const checkpoints = CHECKPOINTS;
 const player: Player = { x: START_POINT.x, y: START_POINT.y, direction: "right", walking: 0, name: "말썽꾸러기", color: "#f16c7a", knockbackX: 0, knockbackY: 0, hitUntil: 0, fallingUntil: 0, fallingStartedAt: 0, fallTargetX: 0, fallTargetY: 0, airUntil: 0, airStartedAt: 0, dashUntil: 0, dashVelocityX: 0, dashVelocityY: 0, health: 5, ammo: 3, shotReadyAt: 0 };
 const PRACTICE_ARENA = { left: 180, top: 136, right: 716, bottom: 536 };
 const testBots: TestBot[] = [];
@@ -346,6 +226,8 @@ let networkSleepUntil = 0;
 let networkSlowUntil = 0;
 let grappleLockUntil = 0;
 let pushLockUntil = 0;
+let networkSpinnerElapsedAtSync = 0;
+let networkSpinnerSyncedAt = 0;
 const clones: Clone[] = [];
 const projectiles: Projectile[] = [];
 const grappleEffects: GrappleEffect[] = [];
@@ -377,6 +259,7 @@ function getControlKey(event: KeyboardEvent) {
 let gameActive = false;
 let lastFrame = performance.now();
 let titleAnimationStartedAt = performance.now();
+let titleFallbackActive = false;
 let toastTimer: number | undefined;
 let checkpointIndex = 0;
 let lap = 0;
@@ -400,15 +283,6 @@ function noise(x: number, y: number) {
 function fillRect(context: CanvasRenderingContext2D, color: string, x: number, y: number, width: number, height: number) {
   context.fillStyle = color;
   context.fillRect(Math.round(x), Math.round(y), Math.round(width), Math.round(height));
-}
-
-function insideRect(x: number, y: number, left: number, top: number, right: number, bottom: number) {
-  return x >= left && x <= right && y >= top && y <= bottom;
-}
-
-function isTrackPoint(x: number, y: number) {
-  return insideRect(x, y, TRACK.outerLeft, TRACK.outerTop, TRACK.outerRight, TRACK.outerBottom)
-    && !insideRect(x, y, TRACK.innerLeft, TRACK.innerTop, TRACK.innerRight, TRACK.innerBottom);
 }
 
 function drawWorldFloor(context: CanvasRenderingContext2D, cameraX: number, cameraY: number) {
@@ -1119,10 +993,10 @@ function useSkill(id: SkillId, now = performance.now()) {
       player.dashVelocityX = aimVector.x * 280;
       player.dashVelocityY = aimVector.y * 280;
       player.dashUntil = now + 165;
-      if (dashCharges === 0) dashRechargeAt = now + 4300;
+      if (dashCharges === 0) dashRechargeAt = now + DASH_RECHARGE_DURATION;
     } else if (id === "run") {
       skillReadyAt.run = now + 9000;
-      runUntil = now + 4600;
+      runUntil = now + RUN_DURATION;
     } else if (id === "push") skillReadyAt.push = now + 2600;
     else if (id === "grab") {
       skillReadyAt.grab = now + 3800;
@@ -1168,13 +1042,13 @@ function useSkill(id: SkillId, now = performance.now()) {
     player.dashVelocityX = aimVector.x * 510;
     player.dashVelocityY = aimVector.y * 510;
     player.dashUntil = now + 165;
-    if (dashCharges === 0) dashRechargeAt = now + 4300;
+    if (dashCharges === 0) dashRechargeAt = now + DASH_RECHARGE_DURATION;
     showToast(`돌진! (${dashCharges}/3)`);
   }
 
   if (id === "run") {
     skillReadyAt.run = now + 9000;
-    runUntil = now + 4600;
+    runUntil = now + RUN_DURATION;
     showToast("질주 모드! 계속 달릴 수 있다.");
   }
 
@@ -1337,16 +1211,6 @@ function damagePlayer(now: number) {
   }
 }
 
-function spawnMatchBots(now: number) {
-  testBots.length = 0;
-  const colors = ["#f4c562", "#78d8e9", "#a985e6", "#e58fba", "#8edb8a"];
-  const spawns = [{ x: 178, y: START_POINT.y }, { x: 226, y: START_POINT.y }, { x: 274, y: START_POINT.y }, { x: 322, y: START_POINT.y }, { x: 370, y: START_POINT.y }];
-  for (let index = 0; index < roomConfig.playerCount - 1; index += 1) {
-    const spawn = spawns[index];
-    testBots.push({ id: index + 1, x: spawn.x, y: spawn.y, direction: "right", walking: index, color: colors[index], name: `러너 ${index + 2}`, skill: roomConfig.enabledSkills[index % roomConfig.enabledSkills.length], moveX: 0, moveY: 0, nextTurnAt: now + index * 500, knockbackX: 0, knockbackY: 0, slowUntil: 0, sleepUntil: 0, health: 5, lap: 0, checkpoint: 0, routeIndex: 0, shotReadyAt: now + 1700 + index * 350 });
-  }
-}
-
 function canBotStand(bot: TestBot, x: number, y: number) {
   if (gameMode === "track") {
     const feet = [[x - 4, y - 3], [x + 4, y - 3], [x - 4, y + 6], [x + 4, y + 6]];
@@ -1494,14 +1358,6 @@ function updateProjectiles(now: number, dt: number) {
   }
 }
 
-function pointSegmentDistance(px: number, py: number, ax: number, ay: number, bx: number, by: number) {
-  const abX = bx - ax;
-  const abY = by - ay;
-  const denominator = abX * abX + abY * abY;
-  const progress = denominator === 0 ? 0 : Math.max(0, Math.min(1, ((px - ax) * abX + (py - ay) * abY) / denominator));
-  return Math.hypot(px - (ax + abX * progress), py - (ay + abY * progress));
-}
-
 function updateObjective() {
   if (gameMode === "practice") {
     elements.objective.textContent = "TEST BOTS";
@@ -1548,7 +1404,12 @@ function beginPitFall(pit: Pit, now: number) {
 }
 
 function updateHazards(now: number, dt: number) {
-  for (const spinner of spinners) spinner.angle += spinner.speed * dt;
+  if (multiplayerActive) {
+    const spinnerElapsed = (networkSpinnerElapsedAtSync + Math.max(0, now - networkSpinnerSyncedAt)) / 1000;
+    for (const spinner of spinners) spinner.angle = spinner.speed * spinnerElapsed;
+  } else {
+    for (const spinner of spinners) spinner.angle += spinner.speed * dt;
+  }
 
   if (!multiplayerActive) {
     if (warningPitIndex >= 0 && now >= pitOpenAt) {
@@ -1561,7 +1422,7 @@ function updateHazards(now: number, dt: number) {
       });
       pitOpenedAlertIndex = activePitIndex;
       pitOpenedAlertUntil = now + 1400;
-      nextPitAt = now + 4000 + Math.random() * 2000;
+      nextPitAt = now + PIT_CYCLE_MIN_DELAY + Math.random() * PIT_CYCLE_RANDOM_DELAY;
       showToast("구덩이가 열렸다!");
     } else if (warningPitIndex < 0 && now >= nextPitAt) {
       let nearestDistance = Number.POSITIVE_INFINITY;
@@ -1573,7 +1434,7 @@ function updateHazards(now: number, dt: number) {
         warningPitIndex = index;
       });
       activePitIndex = -1;
-      pitOpenAt = now + 900;
+      pitOpenAt = now + PIT_WARNING_DURATION;
       pits.forEach((pit, index) => {
         pit.active = false;
         pit.warning = index === warningPitIndex;
@@ -1603,7 +1464,7 @@ function updateHazards(now: number, dt: number) {
     }
   }
 
-  if (now <= player.hitUntil) return;
+  if (multiplayerActive || now <= player.hitUntil) return;
   for (const spinner of spinners) {
     const dx = Math.cos(spinner.angle) * spinner.radius;
     const dy = Math.sin(spinner.angle) * spinner.radius;
@@ -1638,8 +1499,7 @@ function updateProgress(now: number) {
     return;
   }
 
-  const startGate = { x: 128, y: 810, width: 62, height: 82 };
-  if (startArmed && intersects(playerLeft, playerTop, 10, 12, startGate)) {
+  if (startArmed && intersects(playerLeft, playerTop, 10, 12, START_GATE)) {
     lap += 1;
     checkpointIndex = 0;
     startArmed = false;
@@ -1673,9 +1533,9 @@ function updatePlayer(dt: number, now: number) {
     vertical /= length;
     if (Math.abs(horizontal) > Math.abs(vertical)) player.direction = horizontal < 0 ? "left" : "right";
     else player.direction = vertical < 0 ? "up" : "down";
-    const runMultiplier = runUntil > now ? 1.68 : 1;
-    const slowMultiplier = multiplayerActive && networkSlowUntil > now ? .55 : 1;
-    movePlayer(horizontal * 110 * runMultiplier * slowMultiplier * dt, vertical * 110 * runMultiplier * slowMultiplier * dt);
+    const runMultiplier = runUntil > now ? RUN_SPEED_MULTIPLIER : 1;
+    const slowMultiplier = multiplayerActive && networkSlowUntil > now ? SLOW_SPEED_MULTIPLIER : 1;
+    movePlayer(horizontal * PLAYER_BASE_SPEED * runMultiplier * slowMultiplier * dt, vertical * PLAYER_BASE_SPEED * runMultiplier * slowMultiplier * dt);
     player.walking += dt * 12;
   }
 
@@ -2016,38 +1876,10 @@ function drawTown(context: CanvasRenderingContext2D, time: number) {
   fillRect(context, "rgba(34,26,57,.22)", 0, VIEW_HEIGHT - 3, VIEW_WIDTH, 3);
 }
 
-function drawLobbyPreview() {
-  lobbyContext.clearRect(0, 0, VIEW_WIDTH, VIEW_HEIGHT);
-  for (let y = 0; y < VIEW_HEIGHT; y += 16) {
-    for (let x = 0; x < VIEW_WIDTH; x += 16) {
-      const shade = ((x / 16) + (y / 16)) % 2 === 0 ? "#63547d" : "#5b4c75";
-      fillRect(lobbyContext, shade, x, y, 16, 16);
-      fillRect(lobbyContext, "#77658d", x, y + 15, 16, 1);
-      fillRect(lobbyContext, "#77658d", x + 15, y, 1, 16);
-    }
-  }
-  fillRect(lobbyContext, "#34304f", 0, 0, VIEW_WIDTH, 17);
-  fillRect(lobbyContext, "#f6d477", 22, 10, 340, 2);
-  fillRect(lobbyContext, "#29304e", 43, 39, 298, 117);
-  fillRect(lobbyContext, "#cfa767", 46, 42, 292, 111);
-  fillRect(lobbyContext, "#efd18b", 49, 45, 286, 105);
-  drawSofa(lobbyContext, 72, 120);
-  drawArcade(lobbyContext, 287, 95);
-  drawVending(lobbyContext, 103, 77);
-  drawPlant(lobbyContext, 242, 119);
-  drawTable(lobbyContext, 165, 83);
-  drawPerson(lobbyContext, 186, 137, "down", 0, "#f26d7c");
-  drawPerson(lobbyContext, 208, 137, "down", 1, "#78d8e9", true);
-  drawPerson(lobbyContext, 198, 105, "left", 2, "#f4c562", true);
-  const title = "MALSSUNG LOBBY";
-  lobbyContext.font = "bold 9px monospace";
-  lobbyContext.fillStyle = "#fff3b2";
-  lobbyContext.fillText(title, 131, 31);
-}
-
 function animate(now: number) {
   const dt = Math.min(.05, (now - lastFrame) / 1000);
   lastFrame = now;
+  if (titleFallbackActive) drawTitlePreview(now);
   if (gameActive) {
     if (!matchFinished) {
       if (gameMode === "track") {
@@ -2082,6 +1914,8 @@ function syncNetworkHazards(hazards: NetworkHazards) {
   warningPitIndex = hazards.warningPitIndex;
   pitOpenAt = now + Math.max(0, hazards.warningMs);
   nextPitAt = now + Math.max(0, hazards.nextPitMs);
+  networkSpinnerElapsedAtSync = Math.max(0, hazards.spinnerElapsedMs ?? 0);
+  networkSpinnerSyncedAt = now;
   pits.forEach((pit, index) => {
     pit.active = index === activePitIndex;
     pit.warning = index === warningPitIndex;
@@ -2312,9 +2146,9 @@ function sendLocalNetworkState(now: number) {
 }
 
 function readRoomConfig(): RoomConfig | undefined {
-  const lapLimit = Math.floor(Number(elements.lapCount.value));
-  const playerCount = Math.floor(Number(elements.playerCount.value));
-  const enabledSkills = [...elements.skillPool.querySelectorAll<HTMLInputElement>('input[type="checkbox"]:checked')]
+  const lapLimit = Math.floor(Number(elements.titleLapCount.value));
+  const playerCount = Math.floor(Number(elements.titlePlayerCount.value));
+  const enabledSkills = [...elements.titleSkillPool.querySelectorAll<HTMLInputElement>('input[type="checkbox"]:checked')]
     .map((input) => input.value as SkillId)
     .filter((id): id is SkillId => Object.hasOwn(skillLabels, id));
   if (!Number.isFinite(lapLimit) || lapLimit < 1 || lapLimit > 999) {
@@ -2329,19 +2163,17 @@ function readRoomConfig(): RoomConfig | undefined {
     showToast("랜덤 스킬 풀에 최소 3개를 선택하세요.");
     return undefined;
   }
-  elements.lapCount.value = String(lapLimit);
-  elements.playerCount.value = String(playerCount);
+  elements.titleLapCount.value = String(lapLimit);
+  elements.titlePlayerCount.value = String(playerCount);
   return { lapLimit, playerCount, enabledSkills };
 }
 
-function startGame() {
-  const config = readRoomConfig();
-  if (!config) return;
+function startLocalGame(name: string) {
+  const config = roomConfig;
   if (activeNetworkRoom) socket.emit("room:leave");
   activeNetworkRoom = undefined;
   multiplayerActive = false;
   remotePlayers.clear();
-  const name = elements.name.value.trim().slice(0, 10) || "말썽꾸러기";
   const now = performance.now();
   roomConfig = config;
   gameMode = "track";
@@ -2391,14 +2223,14 @@ function startGame() {
     pit.active = false;
     pit.warning = false;
   });
-  nextPitAt = now + 2500;
+  nextPitAt = now + FIRST_PIT_WARNING_DELAY;
   jumpPadCooldownUntil = 0;
   aim.visible = false;
   aim.pulseUntil = 0;
   elements.lap.textContent = `0 / ${roomConfig.lapLimit} LAP`;
   updateObjective();
   elements.playerName.textContent = name;
-  elements.lobby.classList.add("hidden");
+  elements.back.classList.remove("hidden");
   elements.game.classList.remove("hidden");
   gameActive = true;
   elements.gameCanvas.focus();
@@ -2473,8 +2305,8 @@ function startNetworkMatch(room: NetworkRoom) {
   elements.lap.textContent = `${lap} / ${roomConfig.lapLimit} LAP`;
   updateObjective();
   elements.playerName.textContent = self.name;
+  elements.back.classList.remove("hidden");
   elements.title.classList.add("hidden");
-  elements.lobby.classList.add("hidden");
   elements.game.classList.remove("hidden");
   gameActive = true;
   elements.gameCanvas.focus();
@@ -2568,12 +2400,12 @@ function togglePractice() {
     showToast("멀티 레이스 중에는 연습장으로 이동할 수 없어요.");
     return;
   }
-  if (gameMode === "practice" && skillTestRoomActive) returnToLobby();
+  if (gameMode === "practice" && skillTestRoomActive) returnToTitle();
   if (gameMode === "practice") returnToTrack();
   else enterPractice();
 }
 
-function returnToLobby() {
+function returnToTitle() {
   if (activeNetworkRoom) socket.emit("room:leave");
   activeNetworkRoom = undefined;
   multiplayerActive = false;
@@ -2595,20 +2427,12 @@ function returnToLobby() {
   pressedKeys.clear();
   if (document.fullscreenElement) void document.exitFullscreen();
   elements.toast.classList.remove("visible");
+  elements.toast.textContent = "";
   elements.skillBar.classList.add("hidden");
   elements.practice.textContent = "스킬 연습장 이동";
   elements.game.classList.add("hidden");
-  elements.lobby.classList.add("hidden");
   closeTitleRoomPanel();
   elements.title.classList.remove("hidden");
-}
-
-function openLobby(mode: "join" | "create") {
-  elements.title.classList.add("hidden");
-  elements.lobby.classList.remove("hidden");
-  elements.lobby.classList.toggle("join-focus", mode === "join");
-  elements.lobby.classList.toggle("create-focus", mode === "create");
-  drawLobbyPreview();
 }
 
 type TitleRoomMode = "join" | "create";
@@ -2616,16 +2440,6 @@ let titleRoomMode: TitleRoomMode = "join";
 
 function createInviteCode() {
   return `PM-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
-}
-
-function syncTitleSkillPoolFromRoom() {
-  const enabled = new Set([...elements.skillPool.querySelectorAll<HTMLInputElement>('input[type="checkbox"]:checked')].map((input) => input.value));
-  for (const input of elements.titleSkillPool.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')) input.checked = enabled.has(input.value);
-}
-
-function syncRoomFromTitleSkillPool() {
-  const enabled = new Set([...elements.titleSkillPool.querySelectorAll<HTMLInputElement>('input[type="checkbox"]:checked')].map((input) => input.value));
-  for (const input of elements.skillPool.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')) input.checked = enabled.has(input.value);
 }
 
 function openTitleRoomPanel(mode: TitleRoomMode) {
@@ -2646,11 +2460,7 @@ function openTitleRoomPanel(mode: TitleRoomMode) {
   elements.titlePanelMarker.textContent = "CREATE ROOM";
   elements.titlePanelTitle.textContent = "방 생성하기";
   elements.titleConfirm.textContent = "방 열기";
-  elements.titleRunnerName.value = elements.name.value;
-  elements.titleLapCount.value = elements.lapCount.value;
-  elements.titlePlayerCount.value = elements.playerCount.value;
   if (!elements.titleInviteCode.value.trim() || elements.titleInviteCode.value === "PM-7F2A") elements.titleInviteCode.value = createInviteCode();
-  syncTitleSkillPoolFromRoom();
   window.setTimeout(() => elements.titleRunnerName.focus(), 0);
 }
 
@@ -2665,18 +2475,19 @@ function closeTitleRoomPanel() {
   elements.titleStage.classList.remove("create-panel-open");
 }
 
-function startSkillTestRoom() {
+function startSkillTestRoom(name: string) {
   elements.title.classList.add("hidden");
-  elements.lobby.classList.add("hidden");
-  startGame();
+  startLocalGame(name);
   if (!gameActive) return;
+  elements.back.classList.add("hidden");
   skillTestRoomActive = true;
   enterPractice();
 }
 
 async function startFromTitleRoomPanel() {
+  const runnerName = elements.titleRunnerName.value.trim().slice(0, 10) || "말썽꾸러기";
   if (titleRoomMode === "join" && elements.titleRoomCode.value.trim().toUpperCase() === "TEST-SKILL") {
-    startSkillTestRoom();
+    startSkillTestRoom(runnerName);
     return;
   }
   try {
@@ -2695,7 +2506,7 @@ async function startFromTitleRoomPanel() {
         elements.titleRoomCode.focus();
         return;
       }
-      const room = await requestNetworkRoom("room:join", { code, name: elements.name.value });
+      const room = await requestNetworkRoom("room:join", { code, name: runnerName });
       applyNetworkRoom(room);
       if (room.started) {
         startNetworkMatch(room);
@@ -2712,24 +2523,14 @@ async function startFromTitleRoomPanel() {
       elements.titleInviteCode.focus();
       return;
     }
-    elements.name.value = elements.titleRunnerName.value.trim().slice(0, 10) || "말썽꾸러기";
-    elements.lapCount.value = elements.titleLapCount.value;
-    elements.playerCount.value = elements.titlePlayerCount.value;
-    syncRoomFromTitleSkillPool();
     const config = readRoomConfig();
     if (!config) return;
-    const room = await requestNetworkRoom("room:create", { code: inviteCode, name: elements.name.value, config });
+    const room = await requestNetworkRoom("room:create", { code: inviteCode, name: runnerName, config });
     applyNetworkRoom(room);
     showToast(`방 생성 완료 · 초대 코드 ${room.code}`);
   } catch (error) {
     showToast(error instanceof Error ? error.message : "멀티플레이 방을 열지 못했습니다.");
   }
-}
-
-function joinLocalRoom() {
-  elements.title.classList.remove("hidden");
-  elements.lobby.classList.add("hidden");
-  openTitleRoomPanel("join");
 }
 
 async function toggleFullscreen() {
@@ -2807,16 +2608,18 @@ function applyNetworkHazardEffect(effect: HazardEffect) {
   }
 }
 
-elements.enter.addEventListener("click", startGame);
-elements.join.addEventListener("click", joinLocalRoom);
+elements.titleKeyArt.addEventListener("error", () => {
+  titleFallbackActive = true;
+  elements.titleStage.classList.add("fallback-art");
+  titleAnimationStartedAt = performance.now();
+});
 elements.openJoin.addEventListener("click", () => openTitleRoomPanel("join"));
 elements.openCreate.addEventListener("click", () => openTitleRoomPanel("create"));
 elements.titleConfirm.addEventListener("click", () => { void startFromTitleRoomPanel(); });
 elements.titlePanelBack.addEventListener("click", closeTitleRoomPanel);
 elements.titleRoomCode.addEventListener("keydown", (event) => { if (event.key === "Enter") void startFromTitleRoomPanel(); });
 elements.titleInviteCode.addEventListener("keydown", (event) => { if (event.key === "Enter") void startFromTitleRoomPanel(); });
-elements.name.addEventListener("keydown", (event) => { if (event.key === "Enter") startGame(); });
-elements.back.addEventListener("click", returnToLobby);
+elements.back.addEventListener("click", returnToTitle);
 elements.practice.addEventListener("click", togglePractice);
 elements.fullscreen.addEventListener("click", () => { void toggleFullscreen(); });
 
@@ -2949,7 +2752,7 @@ window.addEventListener("keydown", (event) => {
       void document.exitFullscreen();
       return;
     }
-    returnToLobby();
+    returnToTitle();
     return;
   }
   const skillByKey: Record<string, SkillId | undefined> = { "1": "push", "2": "dash", "3": "run", "4": "grab", "5": "clone", "6": "slow", "7": "sleep" };
@@ -2972,5 +2775,4 @@ window.addEventListener("keydown", (event) => {
 window.addEventListener("keyup", (event) => pressedKeys.delete(getControlKey(event)));
 window.addEventListener("blur", () => pressedKeys.clear());
 
-drawLobbyPreview();
 requestAnimationFrame(animate);

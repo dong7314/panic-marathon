@@ -1,0 +1,46 @@
+export type SkillId = "push" | "dash" | "run" | "grab" | "clone" | "slow" | "sleep";
+
+export type Point = Readonly<{ x: number; y: number }>;
+export type Rect = Readonly<{ x: number; y: number; width: number; height: number }>;
+export type TrackBounds = Readonly<{
+  outerLeft: number;
+  outerTop: number;
+  outerRight: number;
+  outerBottom: number;
+  innerLeft: number;
+  innerTop: number;
+  innerRight: number;
+  innerBottom: number;
+}>;
+
+export const WORLD_WIDTH: number;
+export const WORLD_HEIGHT: number;
+export const GRAB_RANGE: number;
+export const GRAB_HIT_RADIUS: number;
+export const CLONE_LIMIT: number;
+export const CLONE_COOLDOWN: number;
+export const CLONE_DURATION: number;
+export const PUSH_DISTANCE: number;
+export const PUSH_DURATION: number;
+export const PLAYER_BASE_SPEED: number;
+export const RUN_SPEED_MULTIPLIER: number;
+export const SLOW_SPEED_MULTIPLIER: number;
+export const RUN_DURATION: number;
+export const DASH_RECHARGE_DURATION: number;
+export const PIT_FALL_DURATION: number;
+export const JUMP_DURATION: number;
+export const PIT_WARNING_DURATION: number;
+export const FIRST_PIT_WARNING_DELAY: number;
+export const PIT_CYCLE_MIN_DELAY: number;
+export const PIT_CYCLE_RANDOM_DELAY: number;
+export const SKILL_IDS: readonly SkillId[];
+export const PLAYER_COLORS: readonly string[];
+export const TRACK: TrackBounds;
+export const START_POINT: Point;
+export const SPAWN_POINTS: readonly Point[];
+export const RESPAWN_POINTS: readonly Point[];
+export const CHECKPOINTS: readonly Readonly<Rect & { spawnX: number; spawnY: number }>[];
+export const START_GATE: Rect;
+export const PIT_ZONES: readonly Rect[];
+export const JUMP_PADS: readonly Readonly<Rect & { pushX: number; pushY: number }>[];
+export const SPINNER_RULES: readonly Readonly<{ x: number; y: number; radius: number; speed: number }>[];

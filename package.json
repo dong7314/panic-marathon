@@ -5,13 +5,14 @@
   "scripts": {
     "vite": "vite --host 127.0.0.1 --port 5174 --strictPort",
     "server": "node --watch server/index.mjs",
-    "dev": "concurrently -k \"npm:server\" \"npm:vite\"",
+    "dev": "node scripts/dev.mjs",
     "multiplayer": "npm run dev",
     "build": "tsc -b && vite build",
-    "check": "tsc -b --pretty false"
+    "check": "tsc -b --pretty false",
+    "test": "node --test",
+    "verify": "npm run check && npm test && npm run build && node --check server/index.mjs"
   },
   "dependencies": {
-    "concurrently": "^10.0.3",
     "socket.io": "^4.8.3",
     "socket.io-client": "^4.8.3"
   },

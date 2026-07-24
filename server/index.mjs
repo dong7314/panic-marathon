@@ -1,52 +1,40 @@
 import { createServer } from "node:http";
 import { Server } from "socket.io";
+import {
+  CHECKPOINTS,
+  CLONE_COOLDOWN,
+  CLONE_DURATION,
+  CLONE_LIMIT,
+  DASH_RECHARGE_DURATION,
+  FIRST_PIT_WARNING_DELAY,
+  GRAB_HIT_RADIUS,
+  GRAB_RANGE,
+  JUMP_DURATION,
+  JUMP_PADS,
+  PIT_CYCLE_MIN_DELAY,
+  PIT_CYCLE_RANDOM_DELAY,
+  PIT_FALL_DURATION,
+  PIT_WARNING_DURATION,
+  PIT_ZONES as PITS,
+  PLAYER_COLORS as COLORS,
+  PUSH_DISTANCE,
+  PUSH_DURATION,
+  RESPAWN_POINTS,
+  RUN_DURATION,
+  SKILL_IDS,
+  SPAWN_POINTS as SPAWNS,
+  SPINNER_RULES,
+  START_GATE,
+  WORLD_HEIGHT,
+  WORLD_WIDTH,
+} from "../shared/game-rules.mjs";
+import { canStandOnTrack, pointSegmentDistance } from "../shared/geometry.mjs";
+import { isMovementAllowed } from "../shared/movement-validation.mjs";
 
 const PORT = Number(process.env.PORT ?? 5175);
 const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN ?? "http://127.0.0.1:5174";
 const TEST_ROOM_CODE = "TEST";
-const GRAB_RANGE = 250;
-const GRAB_HIT_RADIUS = 12;
-const CLONE_LIMIT = 20;
-const CLONE_COOLDOWN = 150;
-const CLONE_DURATION = 10_000;
-const PUSH_DISTANCE = 56;
-const PUSH_DURATION = 320;
-const TRACK = { outerLeft: 32, outerTop: 32, outerRight: 1280, outerBottom: 944, innerLeft: 208, innerTop: 192, innerRight: 1104, innerBottom: 784 };
-const FIRST_PIT_WARNING_DELAY = 2500;
-const PIT_CYCLE_MIN_DELAY = 4000;
-const PIT_CYCLE_RANDOM_DELAY = 2000;
-const SKILLS = new Set(["push", "dash", "run", "grab", "clone", "slow", "sleep"]);
-const COLORS = ["#f16c7a", "#f4c562", "#78d8e9", "#a985e6", "#e58fba", "#8edb8a"];
-const SPAWNS = [
-  { x: 128, y: 856 },
-  { x: 178, y: 856 },
-  { x: 226, y: 856 },
-  { x: 274, y: 856 },
-  { x: 322, y: 856 },
-  { x: 370, y: 856 },
-];
-const RESPAWN_POINTS = [
-  { x: 128, y: 856 },
-  { x: 1152, y: 856 },
-  { x: 1152, y: 120 },
-  { x: 128, y: 120 },
-];
-const CHECKPOINTS = [
-  { x: 1120, y: 816, width: 72, height: 74 },
-  { x: 1120, y: 80, width: 72, height: 74 },
-  { x: 105, y: 80, width: 72, height: 74 },
-];
-const START_GATE = { x: 128, y: 810, width: 62, height: 82 };
-const PITS = [
-  { x: 260, y: 836, width: 34, height: 36 },
-  { x: 1168, y: 350, width: 34, height: 31 },
-  { x: 115, y: 510, width: 34, height: 31 },
-  { x: 840, y: 88, width: 34, height: 34 },
-];
-const JUMP_PADS = [{ x: 920, y: 836, width: 40, height: 30, pushX: -320, pushY: 0 }];
-const PIT_FALL_DURATION = 520;
-const JUMP_DURATION = 560;
-const PIT_WARNING_DURATION = 900;
+const SKILLS = new Set(SKILL_IDS);
 
 const httpServer = createServer();
 const io = new Server(httpServer, {
@@ -94,6 +82,7 @@ function publicHazards(room, now = Date.now()) {
     warningPitIndex: room.hazards.warningPitIndex,
     warningMs,
     nextPitMs: warningMs || Math.max(0, room.hazards.nextPitAt - now),
+    spinnerElapsedMs: room.matchStartedAt > 0 ? Math.max(0, now - room.matchStartedAt) : 0,
   };
 }
 
@@ -204,6 +193,7 @@ function addPlayer(room, socket, name) {
     fallTargetY: spawn.y,
     airUntil: 0,
     jumpPadCooldownUntil: 0,
+    spinnerImmuneUntil: 0,
   });
   socket.join(room.code);
   socket.data.roomCode = room.code;
@@ -236,6 +226,7 @@ function resetPlayers(room) {
     player.fallTargetY = spawn.y;
     player.airUntil = 0;
     player.jumpPadCooldownUntil = 0;
+    player.spinnerImmuneUntil = 0;
   });
 }
 
@@ -244,14 +235,6 @@ function normalisedAim(payload) {
   const y = Number(payload?.dy);
   const length = Math.hypot(x, y);
   return length > 0.01 ? { x: x / length, y: y / length } : { x: 1, y: 0 };
-}
-
-function pointSegmentDistance(px, py, ax, ay, bx, by) {
-  const abX = bx - ax;
-  const abY = by - ay;
-  const denominator = abX * abX + abY * abY;
-  const progress = denominator === 0 ? 0 : Math.max(0, Math.min(1, ((px - ax) * abX + (py - ay) * abY) / denominator));
-  return Math.hypot(px - (ax + abX * progress), py - (ay + abY * progress));
 }
 
 function spawnSkillProjectile(room, attacker, skill, aim, now) {
@@ -299,8 +282,8 @@ function updateSkillProjectiles(room, now) {
       break;
     }
     const expired = now >= projectile.until
-      || projectile.x < 0 || projectile.x > 1344
-      || projectile.y < 0 || projectile.y > 1008;
+      || projectile.x < 0 || projectile.x > WORLD_WIDTH
+      || projectile.y < 0 || projectile.y > WORLD_HEIGHT;
     if (!hitTarget && !expired) continue;
 
     const targetIds = [];
@@ -370,26 +353,8 @@ function findTargetOnAimLine(room, attacker, aim, maxDistance = GRAB_RANGE, hitR
 }
 
 function clampPosition(player) {
-  player.x = Math.max(0, Math.min(1344, player.x));
-  player.y = Math.max(0, Math.min(1008, player.y));
-}
-
-function insideRect(x, y, left, top, right, bottom) {
-  return x >= left && x <= right && y >= top && y <= bottom;
-}
-
-function isTrackPoint(x, y) {
-  return insideRect(x, y, TRACK.outerLeft, TRACK.outerTop, TRACK.outerRight, TRACK.outerBottom)
-    && !insideRect(x, y, TRACK.innerLeft, TRACK.innerTop, TRACK.innerRight, TRACK.innerBottom);
-}
-
-function canStandOnTrack(x, y) {
-  return [
-    [x - 4, y - 3],
-    [x + 4, y - 3],
-    [x - 4, y + 6],
-    [x + 4, y + 6],
-  ].every(([footX, footY]) => isTrackPoint(footX, footY));
+  player.x = Math.max(0, Math.min(WORLD_WIDTH, player.x));
+  player.y = Math.max(0, Math.min(WORLD_HEIGHT, player.y));
 }
 
 function blockedByClone(room, x, y) {
@@ -397,14 +362,24 @@ function blockedByClone(room, x, y) {
   return room.clones.some((clone) => Math.hypot(clone.x - x, clone.y - y) < 13);
 }
 
-function findSafePushEnd(room, target, directionX, directionY) {
-  for (let distance = PUSH_DISTANCE; distance >= 0; distance -= 2) {
+function findSafePushEnd(room, target, directionX, directionY, maximumDistance = PUSH_DISTANCE) {
+  for (let distance = maximumDistance; distance >= 0; distance -= 2) {
     const x = target.x + directionX * distance;
     const y = target.y + directionY * distance;
     if (!canStandOnTrack(x, y) || blockedByClone(room, x, y)) continue;
     return { x, y };
   }
   return { x: target.x, y: target.y };
+}
+
+function findSafeAimPlacement(room, origin, aim, maximumDistance, minimumDistance = 0) {
+  for (let distance = maximumDistance; distance >= minimumDistance; distance -= 2) {
+    const x = origin.x + aim.x * distance;
+    const y = origin.y + aim.y * distance;
+    if (!canStandOnTrack(x, y) || blockedByClone(room, x, y)) continue;
+    return { x, y };
+  }
+  return undefined;
 }
 
 function nudgePlayerFromNewClone(room, player, clone, fallbackX, fallbackY) {
@@ -422,9 +397,9 @@ function nudgePlayerFromNewClone(room, player, clone, fallbackX, fallbackY) {
   ];
   for (const direction of directions) {
     for (let distance = 20; distance <= 48; distance += 4) {
-      const x = Math.max(0, Math.min(1344, clone.x + direction.x * distance));
-      const y = Math.max(0, Math.min(1008, clone.y + direction.y * distance));
-      if (blockedByClone(room, x, y)) continue;
+      const x = Math.max(0, Math.min(WORLD_WIDTH, clone.x + direction.x * distance));
+      const y = Math.max(0, Math.min(WORLD_HEIGHT, clone.y + direction.y * distance));
+      if (!canStandOnTrack(x, y) || blockedByClone(room, x, y)) continue;
       player.x = x;
       player.y = y;
       player.lastUpdateAt = Date.now();
@@ -446,6 +421,7 @@ function respawnPlayer(player) {
   player.fallTargetY = spawn.y;
   player.airUntil = 0;
   player.jumpPadCooldownUntil = 0;
+  player.spinnerImmuneUntil = 0;
   player.pushUntil = 0;
   player.lastUpdateAt = Date.now();
 }
@@ -460,6 +436,7 @@ function respawnPlayerFromPit(player, now = Date.now()) {
   player.fallTargetY = spawn.y;
   player.airUntil = 0;
   player.jumpPadCooldownUntil = now + 500;
+  player.spinnerImmuneUntil = now + 500;
   player.pushUntil = 0;
   player.lastUpdateAt = now;
 }
@@ -508,6 +485,36 @@ function triggerJumpPad(room, player, pad, now) {
   });
 }
 
+function triggerSpinnerKnockback(room, player, spinner, spinnerIndex, now) {
+  const elapsedSeconds = Math.max(0, now - room.matchStartedAt) / 1000;
+  const angle = spinner.speed * elapsedSeconds;
+  const armX = Math.cos(angle) * spinner.radius;
+  const armY = Math.sin(angle) * spinner.radius;
+  if (pointSegmentDistance(player.x, player.y + 2, spinner.x - armX, spinner.y - armY, spinner.x + armX, spinner.y + armY) > 8) return false;
+
+  const awayX = player.x - spinner.x;
+  const awayY = player.y - spinner.y;
+  const distance = Math.max(1, Math.hypot(awayX, awayY));
+  const startX = player.x;
+  const startY = player.y;
+  const end = findSafePushEnd(room, player, awayX / distance, awayY / distance);
+  player.x = end.x;
+  player.y = end.y;
+  player.pushUntil = now + PUSH_DURATION;
+  player.spinnerImmuneUntil = now + 430;
+  player.lastUpdateAt = now;
+  io.to(room.code).emit("combat:knockback", {
+    sourceId: `hazard:spinner:${spinnerIndex}`,
+    targetId: player.id,
+    startX,
+    startY,
+    endX: end.x,
+    endY: end.y,
+    duration: PUSH_DURATION,
+  });
+  return true;
+}
+
 function updatePlayerHazards(room, player, now) {
   if (player.fallingUntil > now || player.airUntil > now) return false;
   const activePit = PITS[room.hazards.activePitIndex];
@@ -521,6 +528,10 @@ function updatePlayerHazards(room, player, now) {
       triggerJumpPad(room, player, jumpPad, now);
       return true;
     }
+  }
+  if (player.pushUntil <= now && player.spinnerImmuneUntil <= now) {
+    const spinnerIndex = SPINNER_RULES.findIndex((spinner, index) => triggerSpinnerKnockback(room, player, spinner, index, now));
+    if (spinnerIndex >= 0) return true;
   }
   return false;
 }
@@ -621,6 +632,7 @@ io.on("connection", (socket) => {
       finished: false,
       winnerId: null,
       winnerName: null,
+      matchStartedAt: 0,
       hazards: createHazardState(),
     };
     rooms.set(code, room);
@@ -646,6 +658,7 @@ io.on("connection", (socket) => {
         finished: false,
         winnerId: null,
         winnerName: null,
+        matchStartedAt: Date.now(),
         hazards: createHazardState(),
       };
       rooms.set(TEST_ROOM_CODE, room);
@@ -682,6 +695,7 @@ io.on("connection", (socket) => {
     room.finished = false;
     room.winnerId = null;
     room.winnerName = null;
+    room.matchStartedAt = Date.now();
     room.clones.length = 0;
     room.projectiles.length = 0;
     resetRoomHazards(room);
@@ -702,10 +716,7 @@ io.on("connection", (socket) => {
     const now = Date.now();
     if (player.sleepUntil > now || player.grappleUntil > now || player.pushUntil > now || player.fallingUntil > 0) return;
     const elapsed = Math.max(16, now - player.lastUpdateAt);
-    const movementScale = (player.slowUntil > now ? .55 : 1) * (player.runUntil > now ? 1.75 : 1);
-    const maxDistance = Math.min(42, (12 + elapsed * 0.22) * movementScale);
-    const distance = Math.hypot(x - player.x, y - player.y);
-    if (distance > maxDistance) return;
+    if (!isMovementAllowed(player.x, player.y, x, y, elapsed, player.slowUntil > now, player.runUntil > now)) return;
     if (blockedByClone(room, x, y)) return;
     player.x = x;
     player.y = y;
@@ -787,9 +798,9 @@ io.on("connection", (socket) => {
       if (target) {
         const targetStartX = target.x;
         const targetStartY = target.y;
-        target.x = attacker.x + aim.x * 34;
-        target.y = attacker.y + aim.y * 34;
-        clampPosition(target);
+        const targetEnd = findSafeAimPlacement(room, attacker, aim, 34) ?? { x: attacker.x, y: attacker.y };
+        target.x = targetEnd.x;
+        target.y = targetEnd.y;
         target.grappleUntil = now + 520;
         targetIds.push(target.id);
         Object.assign(grapple, {
@@ -808,23 +819,29 @@ io.on("connection", (socket) => {
       attacker.nextSkillAt = now + (skill === "slow" ? 4600 : 2000);
     } else if (skill === "dash") {
       attacker.dashCharges -= 1;
-      if (attacker.dashCharges === 0) attacker.dashRechargeAt = now + 4300;
-      attacker.x += aim.x * 46;
-      attacker.y += aim.y * 46;
-      clampPosition(attacker);
+      if (attacker.dashCharges === 0) attacker.dashRechargeAt = now + DASH_RECHARGE_DURATION;
+      const dashEnd = findSafePushEnd(room, attacker, aim.x, aim.y, 46);
+      attacker.x = dashEnd.x;
+      attacker.y = dashEnd.y;
       attacker.nextSkillAt = now + 170;
     } else if (skill === "run") {
-      attacker.runUntil = now + 4600;
+      attacker.runUntil = now + RUN_DURATION;
       attacker.nextSkillAt = now + 9000;
     } else if (skill === "clone") {
       pruneClones(room);
       const ownedClones = room.clones.filter((clone) => clone.ownerId === attacker.id);
       if (ownedClones.length < CLONE_LIMIT) {
+        const spawn = findSafeAimPlacement(room, attacker, aim, 32, 8);
+        if (!spawn) {
+          attacker.nextSkillAt = now + CLONE_COOLDOWN;
+          broadcastRoom(room);
+          return;
+        }
         const clone = {
           id: `${attacker.id}:${now}:${ownedClones.length}`,
           ownerId: attacker.id,
-          x: Math.max(8, Math.min(1336, attacker.x + aim.x * 32)),
-          y: Math.max(8, Math.min(1000, attacker.y + aim.y * 32)),
+          x: spawn.x,
+          y: spawn.y,
           direction: Math.abs(aim.x) > Math.abs(aim.y) ? (aim.x < 0 ? "left" : "right") : (aim.y < 0 ? "up" : "down"),
           until: now + CLONE_DURATION,
         };
