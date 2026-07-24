@@ -31,6 +31,18 @@ import {
 } from "../shared/game-rules.mjs";
 import { canStandOnTrack, pointSegmentDistance } from "../shared/geometry.mjs";
 import { isMovementAllowed } from "../shared/movement-validation.mjs";
+import {
+  canPlayerAct,
+  canPlayerBeDisplaced,
+  canPlayerMove,
+  canPlayerReceiveHit,
+  enterAirborneState,
+  enterDisplacementState,
+  enterFallingState,
+  getPlayerActionState,
+  getPlayerActionStateRemaining,
+  resetPlayerTimedStates,
+} from "../shared/player-state.mjs";
 
 const PORT = Number(process.env.PORT ?? 5175);
 const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN ?? "http://127.0.0.1:5174";
@@ -101,6 +113,7 @@ function refreshDashCharges(player, now = Date.now()) {
 function publicPlayer(player, room) {
   const now = Date.now();
   refreshDashCharges(player, now);
+  const actionState = getPlayerActionState(player, now);
   return {
     id: player.id,
     name: player.name,
@@ -118,12 +131,23 @@ function publicPlayer(player, room) {
     cloneCount: room.clones.filter((clone) => clone.ownerId === player.id && clone.until > now).length,
     dashCharges: player.dashCharges,
     dashRechargeMs: Math.max(0, player.dashRechargeAt - now),
+    actionState,
+    actionStateMs: getPlayerActionStateRemaining(player, now),
+    grappleMs: Math.max(0, player.grappleUntil - now),
+    pushMs: Math.max(0, player.pushUntil - now),
+    sleepMs: Math.max(0, player.sleepUntil - now),
+    slowMs: Math.max(0, player.slowUntil - now),
+    runMs: Math.max(0, player.runUntil - now),
     fallingMs: Math.max(0, player.fallingUntil - now),
     fallingElapsedMs: player.fallingUntil > now ? PIT_FALL_DURATION - (player.fallingUntil - now) : 0,
     fallTargetX: player.fallTargetX,
     fallTargetY: player.fallTargetY,
     airMs: Math.max(0, player.airUntil - now),
     airElapsedMs: player.airUntil > now ? JUMP_DURATION - (player.airUntil - now) : 0,
+    airStartX: player.airStartX,
+    airStartY: player.airStartY,
+    airEndX: player.airEndX,
+    airEndY: player.airEndY,
   };
 }
 
@@ -204,6 +228,10 @@ function addPlayer(room, socket, name) {
     fallTargetX: spawn.x,
     fallTargetY: spawn.y,
     airUntil: 0,
+    airStartX: spawn.x,
+    airStartY: spawn.y,
+    airEndX: spawn.x,
+    airEndY: spawn.y,
     jumpPadCooldownUntil: 0,
     spinnerImmuneUntil: 0,
   });
@@ -226,17 +254,15 @@ function resetPlayers(room, now = Date.now()) {
     player.lastUpdateAt = now;
     player.nextShotAt = 0;
     player.nextSkillAt = 0;
-    player.grappleUntil = 0;
-    player.sleepUntil = 0;
-    player.slowUntil = 0;
-    player.runUntil = 0;
+    resetPlayerTimedStates(player);
     player.dashCharges = 3;
     player.dashRechargeAt = 0;
-    player.pushUntil = 0;
-    player.fallingUntil = 0;
     player.fallTargetX = spawn.x;
     player.fallTargetY = spawn.y;
-    player.airUntil = 0;
+    player.airStartX = spawn.x;
+    player.airStartY = spawn.y;
+    player.airEndX = spawn.x;
+    player.airEndY = spawn.y;
     player.jumpPadCooldownUntil = 0;
     player.spinnerImmuneUntil = 0;
   });
@@ -288,7 +314,7 @@ function updateSkillProjectiles(room, now) {
     projectile.lastUpdateAt = now;
     let hitTarget;
     for (const target of room.players.values()) {
-      if (target.id === projectile.sourceId || target.fallingUntil > now) continue;
+      if (target.id === projectile.sourceId || !canPlayerReceiveHit(target, now)) continue;
       if (pointSegmentDistance(target.x, target.y, startX, startY, projectile.x, projectile.y) > 12) continue;
       hitTarget = target;
       break;
@@ -306,7 +332,7 @@ function updateSkillProjectiles(room, now) {
     }
     if (projectile.kind === "slow") {
       for (const target of room.players.values()) {
-        if (target.id === projectile.sourceId || target.fallingUntil > now) continue;
+        if (target.id === projectile.sourceId || !canPlayerReceiveHit(target, now)) continue;
         if (Math.hypot(target.x - projectile.x, target.y - projectile.y) > 72) continue;
         target.slowUntil = now + 3600;
         targetIds.push(target.id);
@@ -326,12 +352,12 @@ function updateSkillProjectiles(room, now) {
   return stateChanged;
 }
 
-function findTarget(room, attacker, aim, maxDistance, minimumDot = 0.5) {
+function findTarget(room, attacker, aim, maxDistance, minimumDot = 0.5, now = Date.now()) {
   let selected;
   let closest = Number.POSITIVE_INFINITY;
   for (const target of room.players.values()) {
     if (target.id === attacker.id) continue;
-    if (target.fallingUntil > Date.now()) continue;
+    if (!canPlayerReceiveHit(target, now)) continue;
     const dx = target.x - attacker.x;
     const dy = target.y - attacker.y;
     const distance = Math.hypot(dx, dy);
@@ -345,12 +371,12 @@ function findTarget(room, attacker, aim, maxDistance, minimumDot = 0.5) {
   return selected;
 }
 
-function findTargetOnAimLine(room, attacker, aim, maxDistance = GRAB_RANGE, hitRadius = GRAB_HIT_RADIUS) {
+function findTargetOnAimLine(room, attacker, aim, maxDistance = GRAB_RANGE, hitRadius = GRAB_HIT_RADIUS, now = Date.now()) {
   let selected;
   let closestForwardDistance = Number.POSITIVE_INFINITY;
   for (const target of room.players.values()) {
     if (target.id === attacker.id) continue;
-    if (target.fallingUntil > Date.now()) continue;
+    if (!canPlayerBeDisplaced(target, now)) continue;
     const dx = target.x - attacker.x;
     const dy = target.y - attacker.y;
     const forwardDistance = dx * aim.x + dy * aim.y;
@@ -478,22 +504,22 @@ function nudgePlayerFromNewClone(room, player, clone, fallbackX, fallbackY) {
   }
 }
 
-function respawnPlayer(player) {
+function respawnPlayer(player, now = Date.now()) {
   const spawn = RESPAWN_POINTS[Math.min(player.checkpoint, RESPAWN_POINTS.length - 1)] ?? RESPAWN_POINTS[0];
   player.x = spawn.x;
   player.y = spawn.y;
   player.health = 5;
   player.ammo = 3;
-  player.sleepUntil = 0;
-  player.slowUntil = 0;
-  player.fallingUntil = 0;
+  resetPlayerTimedStates(player);
   player.fallTargetX = spawn.x;
   player.fallTargetY = spawn.y;
-  player.airUntil = 0;
-  player.jumpPadCooldownUntil = 0;
-  player.spinnerImmuneUntil = 0;
-  player.pushUntil = 0;
-  player.lastUpdateAt = Date.now();
+  player.airStartX = spawn.x;
+  player.airStartY = spawn.y;
+  player.airEndX = spawn.x;
+  player.airEndY = spawn.y;
+  player.jumpPadCooldownUntil = now + 500;
+  player.spinnerImmuneUntil = now + 500;
+  player.lastUpdateAt = now;
 }
 
 function respawnPlayerFromPit(player, now = Date.now()) {
@@ -501,20 +527,22 @@ function respawnPlayerFromPit(player, now = Date.now()) {
   player.x = spawn.x;
   player.y = spawn.y;
   player.ammo = 3;
-  player.fallingUntil = 0;
+  resetPlayerTimedStates(player);
   player.fallTargetX = spawn.x;
   player.fallTargetY = spawn.y;
-  player.airUntil = 0;
+  player.airStartX = spawn.x;
+  player.airStartY = spawn.y;
+  player.airEndX = spawn.x;
+  player.airEndY = spawn.y;
   player.jumpPadCooldownUntil = now + 500;
   player.spinnerImmuneUntil = now + 500;
-  player.pushUntil = 0;
   player.lastUpdateAt = now;
 }
 
-function damagePlayer(room, target) {
+function damagePlayer(room, target, now = Date.now()) {
   target.health -= 1;
   const defeated = target.health <= 0;
-  if (defeated) respawnPlayer(target);
+  if (defeated) respawnPlayer(target, now);
   return defeated;
 }
 
@@ -528,10 +556,9 @@ function playerTouchesZone(player, zone, padding = 0) {
 }
 
 function triggerPitFall(room, player, pit, now) {
-  player.fallingUntil = now + PIT_FALL_DURATION;
+  enterFallingState(player, now + PIT_FALL_DURATION);
   player.fallTargetX = pit.x + pit.width / 2;
   player.fallTargetY = pit.y + pit.height / 2;
-  player.airUntil = 0;
   player.lastUpdateAt = now;
   io.to(room.code).emit("hazard:effect", {
     kind: "pit",
@@ -543,15 +570,30 @@ function triggerPitFall(room, player, pit, now) {
 }
 
 function triggerJumpPad(room, player, pad, now) {
-  player.airUntil = now + JUMP_DURATION;
+  const startX = player.x;
+  const startY = player.y;
+  const speed = Math.hypot(pad.pushX, pad.pushY);
+  const distance = speed * JUMP_DURATION / 1000;
+  const end = speed > 0
+    ? findSafePushEnd(room, player, pad.pushX / speed, pad.pushY / speed, distance)
+    : { x: player.x, y: player.y };
+  player.x = end.x;
+  player.y = end.y;
+  player.airStartX = startX;
+  player.airStartY = startY;
+  player.airEndX = end.x;
+  player.airEndY = end.y;
+  enterAirborneState(player, now + JUMP_DURATION);
   player.jumpPadCooldownUntil = now + 980;
   player.lastUpdateAt = now;
   io.to(room.code).emit("hazard:effect", {
     kind: "jump",
     playerId: player.id,
     duration: JUMP_DURATION,
-    pushX: pad.pushX,
-    pushY: pad.pushY,
+    startX,
+    startY,
+    endX: end.x,
+    endY: end.y,
   });
 }
 
@@ -570,7 +612,7 @@ function triggerSpinnerKnockback(room, player, spinner, spinnerIndex, now) {
   const end = findSafePushEnd(room, player, awayX / distance, awayY / distance);
   player.x = end.x;
   player.y = end.y;
-  player.pushUntil = now + PUSH_DURATION;
+  enterDisplacementState(player, "pushed", now + PUSH_DURATION);
   player.spinnerImmuneUntil = now + 430;
   player.lastUpdateAt = now;
   io.to(room.code).emit("combat:knockback", {
@@ -586,7 +628,8 @@ function triggerSpinnerKnockback(room, player, spinner, spinnerIndex, now) {
 }
 
 function updatePlayerHazards(room, player, now) {
-  if (player.fallingUntil > now || player.airUntil > now) return false;
+  const actionState = getPlayerActionState(player, now);
+  if (actionState === "falling" || actionState === "airborne") return false;
   const activePit = PITS[room.hazards.activePitIndex];
   if (activePit && playerTouchesZone(player, activePit, 4)) {
     triggerPitFall(room, player, activePit, now);
@@ -599,7 +642,7 @@ function updatePlayerHazards(room, player, now) {
       return true;
     }
   }
-  if (player.pushUntil <= now && player.spinnerImmuneUntil <= now) {
+  if (canPlayerBeDisplaced(player, now) && player.spinnerImmuneUntil <= now) {
     const spinnerIndex = SPINNER_RULES.findIndex((spinner, index) => triggerSpinnerKnockback(room, player, spinner, index, now));
     if (spinnerIndex >= 0) return true;
   }
@@ -799,7 +842,7 @@ io.on("connection", (socket) => {
     const y = Number(payload?.y);
     if (!Number.isFinite(x) || !Number.isFinite(y)) return;
     const now = Date.now();
-    if (player.sleepUntil > now || player.grappleUntil > now || player.pushUntil > now || player.fallingUntil > 0) return;
+    if (!canPlayerMove(player, now)) return;
     const elapsed = Math.max(16, now - player.lastUpdateAt);
     if (!isMovementAllowed(player.x, player.y, x, y, elapsed, player.slowUntil > now, player.runUntil > now)) return;
     if (blockedByClone(room, x, y)) return;
@@ -822,12 +865,12 @@ io.on("connection", (socket) => {
     const room = rooms.get(socket.data.roomCode);
     const attacker = room?.players.get(socket.id);
     const now = Date.now();
-    if (!room || room.phase !== "running" || !attacker || attacker.fallingUntil > 0 || attacker.pushUntil > now || attacker.sleepUntil > now || attacker.nextShotAt > now || attacker.ammo <= 0) return;
+    if (!room || room.phase !== "running" || !attacker || !canPlayerAct(attacker, now) || attacker.nextShotAt > now || attacker.ammo <= 0) return;
     const aim = normalisedAim(payload);
     attacker.ammo -= 1;
     attacker.nextShotAt = now + 210;
-    const target = findTarget(room, attacker, aim, 230, .82);
-    const defeated = target ? damagePlayer(room, target) : false;
+    const target = findTarget(room, attacker, aim, 230, .82, now);
+    const defeated = target ? damagePlayer(room, target, now) : false;
     io.to(room.code).emit("combat:shot", { sourceId: attacker.id, x: attacker.x + aim.x * 8, y: attacker.y + aim.y * 2, dx: aim.x, dy: aim.y });
     io.to(room.code).emit("combat:effect", { kind: "bullet", sourceId: attacker.id, targetIds: target ? [target.id] : [], defeated });
     broadcastRoom(room);
@@ -837,7 +880,7 @@ io.on("connection", (socket) => {
     const room = rooms.get(socket.data.roomCode);
     const attacker = room?.players.get(socket.id);
     const now = Date.now();
-    if (!room || room.phase !== "running" || !attacker || attacker.fallingUntil > 0 || attacker.pushUntil > now || attacker.sleepUntil > now || attacker.nextSkillAt > now) return;
+    if (!room || room.phase !== "running" || !attacker || !canPlayerAct(attacker, now) || attacker.nextSkillAt > now) return;
     const skill = attacker.skill;
     refreshDashCharges(attacker, now);
     if (skill === "dash" && attacker.dashCharges <= 0) return;
@@ -847,7 +890,7 @@ io.on("connection", (socket) => {
     if (skill === "push") {
       for (const target of room.players.values()) {
         if (target.id === attacker.id) continue;
-        if (target.fallingUntil > now) continue;
+        if (!canPlayerBeDisplaced(target, now)) continue;
         const dx = target.x - attacker.x;
         const dy = target.y - attacker.y;
         const distance = Math.hypot(dx, dy);
@@ -857,7 +900,7 @@ io.on("connection", (socket) => {
         const pushEnd = findSafePushEnd(room, target, dx / distance, dy / distance);
         target.x = pushEnd.x;
         target.y = pushEnd.y;
-        target.pushUntil = now + PUSH_DURATION;
+        enterDisplacementState(target, "pushed", now + PUSH_DURATION);
         target.lastUpdateAt = now;
         targetIds.push(target.id);
         io.to(room.code).emit("combat:knockback", {
@@ -872,7 +915,7 @@ io.on("connection", (socket) => {
       }
       attacker.nextSkillAt = now + 2600;
     } else if (skill === "grab") {
-      const target = findTargetOnAimLine(room, attacker, aim);
+      const target = findTargetOnAimLine(room, attacker, aim, GRAB_RANGE, GRAB_HIT_RADIUS, now);
       const grapple = {
         sourceId: attacker.id,
         sourceX: attacker.x,
@@ -886,7 +929,7 @@ io.on("connection", (socket) => {
         const targetEnd = findSafeAimPlacement(room, attacker, aim, 34) ?? { x: attacker.x, y: attacker.y };
         target.x = targetEnd.x;
         target.y = targetEnd.y;
-        target.grappleUntil = now + 520;
+        enterDisplacementState(target, "grappled", now + 520);
         targetIds.push(target.id);
         Object.assign(grapple, {
           targetId: target.id,
@@ -896,7 +939,7 @@ io.on("connection", (socket) => {
           targetEndY: target.y,
         });
       }
-      attacker.grappleUntil = now + 520;
+      enterDisplacementState(attacker, "grappled", now + 520);
       io.to(room.code).emit("combat:grapple", grapple);
       attacker.nextSkillAt = now + 3800;
     } else if (skill === "slow" || skill === "sleep") {
@@ -933,7 +976,7 @@ io.on("connection", (socket) => {
         room.clones.push(clone);
         for (const target of room.players.values()) {
           if (target.id === attacker.id) continue;
-          if (target.fallingUntil > now) continue;
+          if (!canPlayerBeDisplaced(target, now)) continue;
           nudgePlayerFromNewClone(room, target, clone, aim.x, aim.y);
         }
       }
