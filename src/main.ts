@@ -174,7 +174,7 @@ app.innerHTML = `
             </div>
             <div class="pixel-panel controls-panel"><span>MOVE</span><b>W A S D</b><span>GUN</span><b>L-CLICK</b><span>SKILL</span><b>R-CLICK</b><span>MENU</span><b>ESC</b></div>
             <button id="practice-button" class="ghost-button">스킬 연습장 이동</button>
-            <button id="back-to-lobby" class="ghost-button">로비로 돌아가기</button>
+            <button id="back-to-lobby" class="ghost-button">메인 화면으로 돌아가기</button>
           </aside>
         </div>
       </div>
@@ -2273,7 +2273,7 @@ function enterPractice() {
   player.dashUntil = 0;
   runUntil = 0;
   resetSkillPractice(now);
-  elements.practice.textContent = skillTestRoomActive ? "로비로 돌아가기" : "운동장으로 돌아가기";
+  elements.practice.textContent = skillTestRoomActive ? "메인 화면으로 돌아가기" : "운동장으로 돌아가기";
   updateObjective();
   showToast(skillTestRoomActive ? "스킬 테스트 방 입장! 더미에게 자유롭게 사용해보세요." : "스킬 연습장 입장! 숫자 1~7 또는 R을 눌러 테스트하세요.");
 }
@@ -2318,14 +2318,19 @@ function returnToLobby() {
   grappleLockUntil = 0;
   grappleEffects.length = 0;
   skillTestRoomActive = false;
+  gameMode = "track";
   resetWorldLabels();
   gameActive = false;
   aim.visible = false;
   pressedKeys.clear();
   if (document.fullscreenElement) void document.exitFullscreen();
+  elements.toast.classList.remove("visible");
   elements.skillBar.classList.add("hidden");
+  elements.practice.textContent = "스킬 연습장 이동";
   elements.game.classList.add("hidden");
-  elements.lobby.classList.remove("hidden");
+  elements.lobby.classList.add("hidden");
+  closeTitleRoomPanel();
+  elements.title.classList.remove("hidden");
 }
 
 function openLobby(mode: "join" | "create") {
