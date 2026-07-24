@@ -19,6 +19,7 @@ export const RUN_SPEED_MULTIPLIER = 1.68;
 export const SLOW_SPEED_MULTIPLIER = 0.55;
 export const RUN_DURATION = 4600;
 export const DASH_RECHARGE_DURATION = 4300;
+export const MATCH_TIME_LIMIT = 60 * 60 * 1000;
 
 export const PIT_FALL_DURATION = 520;
 export const JUMP_DURATION = 560;

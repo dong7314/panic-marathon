@@ -27,6 +27,7 @@ export const RUN_SPEED_MULTIPLIER: number;
 export const SLOW_SPEED_MULTIPLIER: number;
 export const RUN_DURATION: number;
 export const DASH_RECHARGE_DURATION: number;
+export const MATCH_TIME_LIMIT: number;
 export const PIT_FALL_DURATION: number;
 export const JUMP_DURATION: number;
 export const PIT_WARNING_DURATION: number;

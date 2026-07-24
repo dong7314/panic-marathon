@@ -72,6 +72,22 @@ export type NetworkPlayer = {
 
 export type NetworkClone = { id: string; ownerId: string; x: number; y: number; direction: Direction; until: number };
 export type NetworkHazards = { activePitIndex: number; warningPitIndex: number; warningMs: number; nextPitMs: number; spinnerElapsedMs: number };
+export type NetworkRoomPhase = "waiting" | "running" | "finished";
+export type NetworkStanding = {
+  place: number;
+  id: string;
+  name: string;
+  color: string;
+  lap: number;
+  checkpoint: number;
+  completed: boolean;
+  finishTimeMs: number | null;
+};
+export type NetworkMatchResult = {
+  reason: "completed" | "time-limit";
+  durationMs: number;
+  standings: NetworkStanding[];
+};
 export type RemotePlayer = NetworkPlayer & {
   targetX: number;
   targetY: number;
@@ -87,7 +103,20 @@ export type RemotePlayer = NetworkPlayer & {
   slowEffectUntil: number;
 };
 
-export type NetworkRoom = { code: string; hostId: string; config: RoomConfig; started: boolean; finished: boolean; winner: { id: string; name: string } | null; hazards: NetworkHazards; players: NetworkPlayer[]; clones: NetworkClone[] };
+export type NetworkRoom = {
+  code: string;
+  hostId: string;
+  config: RoomConfig;
+  phase: NetworkRoomPhase;
+  round: number;
+  started: boolean;
+  finished: boolean;
+  winner: { id: string; name: string } | null;
+  result: NetworkMatchResult | null;
+  hazards: NetworkHazards;
+  players: NetworkPlayer[];
+  clones: NetworkClone[];
+};
 export type NetworkResponse = { ok: true; room: NetworkRoom } | { ok: false; error: string };
 export type LabelledRunner = Pick<TestBot, "id" | "name" | "skill"> | Pick<RemotePlayer, "id" | "name" | "skill" | "skillCooldownUntil" | "cloneCount" | "dashCharges" | "dashRechargeUntil">;
 export type GrappleEffect = { sourceId: string | number; targetId?: string | number; sourceX: number; sourceY: number; hookX: number; hookY: number; targetStartX?: number; targetStartY?: number; targetEndX?: number; targetEndY?: number; startedAt: number; until: number };

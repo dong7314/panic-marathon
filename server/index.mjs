@@ -11,6 +11,7 @@ import {
   GRAB_RANGE,
   JUMP_DURATION,
   JUMP_PADS,
+  MATCH_TIME_LIMIT,
   PIT_CYCLE_MIN_DELAY,
   PIT_CYCLE_RANDOM_DELAY,
   PIT_FALL_DURATION,
@@ -35,6 +36,7 @@ const PORT = Number(process.env.PORT ?? 5175);
 const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN ?? "http://127.0.0.1:5174";
 const TEST_ROOM_CODE = "TEST";
 const SKILLS = new Set(SKILL_IDS);
+const MATCH_TIME_LIMIT_MS = Math.max(100, Number(process.env.MATCH_TIME_LIMIT_MS) || MATCH_TIME_LIMIT);
 
 const httpServer = createServer();
 const io = new Server(httpServer, {
@@ -77,12 +79,15 @@ function createHazardState(now = Date.now()) {
 
 function publicHazards(room, now = Date.now()) {
   const warningMs = room.hazards.warningPitIndex >= 0 ? Math.max(0, room.hazards.openAt - now) : 0;
+  const spinnerElapsedMs = room.matchStartedAt > 0
+    ? room.result?.durationMs ?? Math.max(0, now - room.matchStartedAt)
+    : 0;
   return {
     activePitIndex: room.hazards.activePitIndex,
     warningPitIndex: room.hazards.warningPitIndex,
     warningMs,
     nextPitMs: warningMs || Math.max(0, room.hazards.nextPitAt - now),
-    spinnerElapsedMs: room.matchStartedAt > 0 ? Math.max(0, now - room.matchStartedAt) : 0,
+    spinnerElapsedMs,
   };
 }
 
@@ -129,13 +134,19 @@ function pruneClones(room) {
 
 function snapshot(room) {
   pruneClones(room);
+  const started = room.phase !== "waiting";
+  const finished = room.phase === "finished";
+  const winner = room.result?.standings[0] ?? null;
   return {
     code: room.code,
     hostId: room.hostId,
     config: room.config,
-    started: room.started,
-    finished: room.finished,
-    winner: room.winnerId ? { id: room.winnerId, name: room.winnerName } : null,
+    phase: room.phase,
+    round: room.round,
+    started,
+    finished,
+    winner: winner ? { id: winner.id, name: winner.name } : null,
+    result: room.result,
     hazards: publicHazards(room),
     players: [...room.players.values()].map((player) => publicPlayer(player, room)),
     clones: room.clones.map((clone) => ({ ...clone })),
@@ -169,6 +180,7 @@ function addPlayer(room, socket, name) {
     id: socket.id,
     name: sanitizeName(name),
     color: COLORS[index % COLORS.length],
+    joinOrder: room.nextJoinOrder++,
     x: spawn.x,
     y: spawn.y,
     direction: "right",
@@ -199,7 +211,7 @@ function addPlayer(room, socket, name) {
   socket.data.roomCode = room.code;
 }
 
-function resetPlayers(room) {
+function resetPlayers(room, now = Date.now()) {
   [...room.players.values()].forEach((player, index) => {
     const spawn = SPAWNS[index] ?? SPAWNS[0];
     player.x = spawn.x;
@@ -211,7 +223,7 @@ function resetPlayers(room) {
     player.skill = rollSkill(room);
     player.lap = 0;
     player.checkpoint = 0;
-    player.lastUpdateAt = Date.now();
+    player.lastUpdateAt = now;
     player.nextShotAt = 0;
     player.nextSkillAt = 0;
     player.grappleUntil = 0;
@@ -355,6 +367,64 @@ function findTargetOnAimLine(room, attacker, aim, maxDistance = GRAB_RANGE, hitR
 function clampPosition(player) {
   player.x = Math.max(0, Math.min(WORLD_WIDTH, player.x));
   player.y = Math.max(0, Math.min(WORLD_HEIGHT, player.y));
+}
+
+function progressScore(player) {
+  return player.lap * (CHECKPOINTS.length + 1) + player.checkpoint;
+}
+
+function distanceToNextGate(player) {
+  const gate = CHECKPOINTS[player.checkpoint] ?? START_GATE;
+  return Math.hypot(player.x - (gate.x + gate.width / 2), player.y - (gate.y + gate.height / 2));
+}
+
+function buildMatchResult(room, reason, now, winnerId) {
+  const players = [...room.players.values()];
+  players.sort((left, right) => {
+    if (left.id === winnerId) return -1;
+    if (right.id === winnerId) return 1;
+    const progressDifference = progressScore(right) - progressScore(left);
+    if (progressDifference !== 0) return progressDifference;
+    const distanceDifference = distanceToNextGate(left) - distanceToNextGate(right);
+    if (Math.abs(distanceDifference) > 0.001) return distanceDifference;
+    return left.joinOrder - right.joinOrder;
+  });
+  const durationMs = Math.max(0, now - room.matchStartedAt);
+  return {
+    reason,
+    durationMs,
+    standings: players.map((player, index) => ({
+      place: index + 1,
+      id: player.id,
+      name: player.name,
+      color: player.color,
+      lap: Math.min(player.lap, room.config.lapLimit),
+      checkpoint: player.checkpoint,
+      completed: player.lap >= room.config.lapLimit,
+      finishTimeMs: player.lap >= room.config.lapLimit ? durationMs : null,
+    })),
+  };
+}
+
+function finishRoom(room, reason, now = Date.now(), winnerId) {
+  if (room.phase !== "running") return false;
+  room.phase = "finished";
+  room.result = buildMatchResult(room, reason, now, winnerId);
+  room.clones.length = 0;
+  room.projectiles.length = 0;
+  io.to(room.code).emit("match:finished", snapshot(room));
+  return true;
+}
+
+function startRoomMatch(room, now = Date.now()) {
+  room.phase = "running";
+  room.round += 1;
+  room.result = null;
+  room.matchStartedAt = now;
+  room.clones.length = 0;
+  room.projectiles.length = 0;
+  resetRoomHazards(room, now);
+  resetPlayers(room, now);
 }
 
 function blockedByClone(room, x, y) {
@@ -579,7 +649,7 @@ function updateRoomHazards(room, now) {
 }
 
 function updateRaceProgress(room, player, now = Date.now()) {
-  if (room.finished) return false;
+  if (room.phase !== "running") return false;
   const checkpoint = CHECKPOINTS[player.checkpoint];
   if (checkpoint && playerTouchesZone(player, checkpoint, 8)) {
     player.checkpoint += 1;
@@ -597,9 +667,7 @@ function updateRaceProgress(room, player, now = Date.now()) {
   player.checkpoint = 0;
   player.lastUpdateAt = now;
   if (player.lap >= room.config.lapLimit) {
-    room.finished = true;
-    room.winnerId = player.id;
-    room.winnerName = player.name;
+    finishRoom(room, "completed", now, player.id);
   }
   return true;
 }
@@ -626,12 +694,12 @@ io.on("connection", (socket) => {
       hostId: socket.id,
       config: sanitizeConfig(payload?.config),
       players: new Map(),
+      nextJoinOrder: 0,
       clones: [],
       projectiles: [],
-      started: false,
-      finished: false,
-      winnerId: null,
-      winnerName: null,
+      phase: "waiting",
+      round: 0,
+      result: null,
       matchStartedAt: 0,
       hazards: createHazardState(),
     };
@@ -652,12 +720,12 @@ io.on("connection", (socket) => {
         hostId: socket.id,
         config: { lapLimit: 5, playerCount: 6, enabledSkills: [...SKILLS] },
         players: new Map(),
+        nextJoinOrder: 0,
         clones: [],
         projectiles: [],
-        started: true,
-        finished: false,
-        winnerId: null,
-        winnerName: null,
+        phase: "running",
+        round: 1,
+        result: null,
         matchStartedAt: Date.now(),
         hazards: createHazardState(),
       };
@@ -667,7 +735,7 @@ io.on("connection", (socket) => {
       ack(callback, { ok: false, error: "방을 찾지 못했습니다. 초대 코드를 확인하세요." });
       return;
     }
-    if (room.started && code !== TEST_ROOM_CODE) {
+    if (room.phase !== "waiting" && code !== TEST_ROOM_CODE) {
       ack(callback, { ok: false, error: "이미 진행 중인 경기입니다." });
       return;
     }
@@ -691,15 +759,32 @@ io.on("connection", (socket) => {
       ack(callback, { ok: false, error: "최소 2명이 참가해야 시작할 수 있습니다." });
       return;
     }
-    room.started = true;
-    room.finished = false;
-    room.winnerId = null;
-    room.winnerName = null;
-    room.matchStartedAt = Date.now();
-    room.clones.length = 0;
-    room.projectiles.length = 0;
-    resetRoomHazards(room);
-    resetPlayers(room);
+    if (room.phase !== "waiting") {
+      ack(callback, { ok: false, error: "대기 중인 방에서만 경기를 시작할 수 있습니다." });
+      return;
+    }
+    startRoomMatch(room);
+    const roomSnapshot = snapshot(room);
+    ack(callback, { ok: true, room: roomSnapshot });
+    io.to(room.code).emit("match:started", roomSnapshot);
+    broadcastRoom(room);
+  });
+
+  socket.on("room:rematch", (callback) => {
+    const room = rooms.get(socket.data.roomCode);
+    if (!room || room.hostId !== socket.id) {
+      ack(callback, { ok: false, error: "방장만 재대결을 시작할 수 있습니다." });
+      return;
+    }
+    if (room.phase !== "finished") {
+      ack(callback, { ok: false, error: "경기가 끝난 뒤에만 재대결할 수 있습니다." });
+      return;
+    }
+    if (room.players.size < 2) {
+      ack(callback, { ok: false, error: "최소 2명이 참가해야 재대결할 수 있습니다." });
+      return;
+    }
+    startRoomMatch(room);
     const roomSnapshot = snapshot(room);
     ack(callback, { ok: true, room: roomSnapshot });
     io.to(room.code).emit("match:started", roomSnapshot);
@@ -709,7 +794,7 @@ io.on("connection", (socket) => {
   socket.on("player:state", (payload) => {
     const room = rooms.get(socket.data.roomCode);
     const player = room?.players.get(socket.id);
-    if (!room || !room.started || room.finished || !player) return;
+    if (!room || room.phase !== "running" || !player) return;
     const x = Number(payload?.x);
     const y = Number(payload?.y);
     if (!Number.isFinite(x) || !Number.isFinite(y)) return;
@@ -737,7 +822,7 @@ io.on("connection", (socket) => {
     const room = rooms.get(socket.data.roomCode);
     const attacker = room?.players.get(socket.id);
     const now = Date.now();
-    if (!room || !room.started || room.finished || !attacker || attacker.fallingUntil > 0 || attacker.pushUntil > now || attacker.sleepUntil > now || attacker.nextShotAt > now || attacker.ammo <= 0) return;
+    if (!room || room.phase !== "running" || !attacker || attacker.fallingUntil > 0 || attacker.pushUntil > now || attacker.sleepUntil > now || attacker.nextShotAt > now || attacker.ammo <= 0) return;
     const aim = normalisedAim(payload);
     attacker.ammo -= 1;
     attacker.nextShotAt = now + 210;
@@ -752,7 +837,7 @@ io.on("connection", (socket) => {
     const room = rooms.get(socket.data.roomCode);
     const attacker = room?.players.get(socket.id);
     const now = Date.now();
-    if (!room || !room.started || room.finished || !attacker || attacker.fallingUntil > 0 || attacker.pushUntil > now || attacker.sleepUntil > now || attacker.nextSkillAt > now) return;
+    if (!room || room.phase !== "running" || !attacker || attacker.fallingUntil > 0 || attacker.pushUntil > now || attacker.sleepUntil > now || attacker.nextSkillAt > now) return;
     const skill = attacker.skill;
     refreshDashCharges(attacker, now);
     if (skill === "dash" && attacker.dashCharges <= 0) return;
@@ -877,7 +962,12 @@ io.on("connection", (socket) => {
 const hazardTimer = setInterval(() => {
   const now = Date.now();
   for (const room of rooms.values()) {
-    if (!room.started || room.finished) continue;
+    if (room.phase !== "running") continue;
+    if (now - room.matchStartedAt >= MATCH_TIME_LIMIT_MS) {
+      finishRoom(room, "time-limit", now);
+      broadcastRoom(room);
+      continue;
+    }
     updateRoomHazards(room, now);
     let roomStateChanged = updateSkillProjectiles(room, now);
     for (const player of room.players.values()) {
