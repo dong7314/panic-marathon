@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   CHECKPOINTS,
   CLONE_LIMIT,
+  MATCH_TIME_LIMIT,
   PIT_ZONES,
   SKILL_IDS,
   SPINNER_RULES,
@@ -15,6 +16,7 @@ import { getMovementLimit, isMovementAllowed } from "../shared/movement-validati
 test("shared race rules expose the expected playable layout", () => {
   assert.equal(SKILL_IDS.length, 7);
   assert.equal(CLONE_LIMIT, 20);
+  assert.equal(MATCH_TIME_LIMIT, 60 * 60 * 1000);
   assert.equal(CHECKPOINTS.length, 3);
   assert.equal(PIT_ZONES.length, 4);
   assert.equal(SPINNER_RULES.length, 3);

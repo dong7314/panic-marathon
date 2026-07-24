@@ -138,3 +138,59 @@ test("multiplayer rooms preserve names and reject movement into the infield", { 
   const hostState = snapshot.players.find((player) => player.id === host.id);
   assert.deepEqual({ x: hostState?.x, y: hostState?.y }, { x: 240, y: 792 });
 });
+
+test("a finished room publishes full standings and lets only the host start a rematch", { timeout: 10_000 }, async (t) => {
+  const port = await reservePort();
+  const server = spawn(process.execPath, ["server/index.mjs"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      PORT: String(port),
+      CLIENT_ORIGIN: "http://127.0.0.1:5174",
+      MATCH_TIME_LIMIT_MS: "300",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  await waitForServer(server);
+
+  const url = `http://127.0.0.1:${port}`;
+  const host = await connectClient(url);
+  const guest = await connectClient(url);
+  t.after(() => {
+    host.disconnect();
+    guest.disconnect();
+    server.kill();
+  });
+
+  const code = `PM-R${String(port).slice(-3)}`;
+  await request(host, "room:create", {
+    code,
+    name: "Alpha",
+    config: { lapLimit: 3, playerCount: 2, enabledSkills: ["push", "dash", "run"] },
+  });
+  await request(guest, "room:join", { code, name: "Beta" });
+  const hostFinished = onceMatching(host, "match:finished", (room) => room.code === code);
+  const guestFinished = onceMatching(guest, "match:finished", (room) => room.code === code);
+  const started = await request(host, "room:start");
+
+  assert.equal(started.phase, "running");
+  assert.equal(started.round, 1);
+  const [hostResult, guestResult] = await Promise.all([hostFinished, guestFinished]);
+  assert.equal(hostResult.phase, "finished");
+  assert.equal(hostResult.result.reason, "time-limit");
+  assert.equal(hostResult.result.standings.length, 2);
+  assert.deepEqual(hostResult.result.standings.map(({ place, name }) => ({ place, name })), [
+    { place: 1, name: "Beta" },
+    { place: 2, name: "Alpha" },
+  ]);
+  assert.deepEqual(guestResult.result, hostResult.result);
+
+  await assert.rejects(request(guest, "room:rematch"), /방장만 재대결/);
+  const guestRestarted = onceMatching(guest, "match:started", (room) => room.code === code && room.round === 2);
+  const restarted = await request(host, "room:rematch");
+  const guestRestart = await guestRestarted;
+  assert.equal(restarted.phase, "running");
+  assert.equal(restarted.round, 2);
+  assert.equal(restarted.result, null);
+  assert.equal(guestRestart.players.every((player) => player.lap === 0 && player.checkpoint === 0), true);
+});
