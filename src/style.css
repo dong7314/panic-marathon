@@ -62,6 +62,26 @@ input:focus { border-color: #f4cd64; }
 .skill-bar { position: absolute; top: 52px; right: 10px; left: 10px; z-index: 2; display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; pointer-events: none; }.skill-bar.track-mode { top: auto; right: 10px; bottom: 59px; left: auto; justify-content: flex-end; }.skill-chip { min-width: 112px; padding: 7px 8px; color: #fff7dc; background: rgba(42,37,68,.92); border: 1px solid #82769d; box-shadow: 1px 1px 0 rgba(20,17,37,.8); font-size: 12px; font-weight: 900; line-height: 1.35; text-align: center; }.skill-chip b { display: block; color: #f5ce66; font-size: 12px; }.skill-chip.cooldown { color: #9e96ad; background: rgba(36,34,55,.95); border-color: #5b5772; }.skill-chip.cooldown b { color: #a79cac; }.skill-chip.active { border-color: #7ee2b1; box-shadow: 0 0 0 1px rgba(126,226,177,.4); }
 .side-panel { position: absolute; top: 82px; right: 12px; z-index: 3; display: grid; width: 260px; gap: 10px; }.side-panel .pixel-panel { padding: 13px; background: rgba(47,45,79,.94); }.side-panel p { margin: 8px 0 0; color: #cfc6d8; font-size: 12px; font-weight: 700; line-height: 1.55; }.eyebrow { color: #f4cd64; font-size: 12px; font-weight: 900; letter-spacing: .1em; }.player-name-tag { margin-top: 7px; color: #85dfb1; font-size: 16px; font-weight: 900; }.controls-panel { display: grid; grid-template-columns: 1fr auto; gap: 7px; color: #bfb6cd; font-size: 12px; }.controls-panel b { color: #f4cd64; }.ghost-button { padding: 10px; color: #d9d2e3; background: rgba(64,61,95,.96); border: 2px solid #777197; box-shadow: 3px 3px 0 #18172e; font-size: 12px; font-weight: 900; }.ghost-button:hover { color: #fff9e5; background: #5d5880; }
 
+.match-results { position: absolute; inset: 0; z-index: 12; display: grid; padding: 18px; overflow: auto; background: rgba(14,14,34,.82); place-items: center; }
+.result-card { width: min(470px, 100%); max-height: 100%; padding: 22px; overflow: auto; color: #f8f4e6; background: #302d4f; border: 4px solid #f4cd64; box-shadow: 8px 8px 0 #151329; font-family: "Galmuri", "Noto Sans KR", monospace; }
+.result-marker { display: block; color: #7ee2b1; font-size: 12px; letter-spacing: .12em; }
+.result-card h2 { margin: 8px 0 4px; color: #fff4af; font-size: 25px; line-height: 1.25; }
+.result-summary { margin: 0 0 15px; color: #cfc6d8; font-size: 12px; }
+.result-standings { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.result-row { display: grid; grid-template-columns: 28px 14px minmax(0, 1fr) auto; gap: 8px; align-items: center; min-height: 36px; padding: 7px 9px; color: #eae4f1; background: #24223e; border: 2px solid #5f5879; font-size: 12px; }
+.result-row:first-child { color: #fff4af; border-color: #dcae55; }
+.result-row.me { background: #24424a; border-color: #70c9a2; }
+.result-place { color: #f4cd64; font-size: 16px; text-align: center; }
+.result-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.result-progress { color: #bcebd4; text-align: right; white-space: nowrap; }
+.result-actions { display: grid; grid-template-columns: 1fr auto; gap: 8px; margin-top: 16px; }
+.result-actions button { min-height: 42px; padding: 9px 12px; font-family: inherit; font-size: 12px; font-weight: 700; }
+.result-primary { color: #173a4d; background: #fff0a3; border: 2px solid #fff9d2; box-shadow: 3px 3px 0 #d76f72; }
+.result-secondary { color: #ecfff7; background: #514b70; border: 2px solid #8a82a4; box-shadow: 3px 3px 0 #18172e; }
+.result-actions button:hover:not(:disabled) { transform: translate(1px, 1px); box-shadow: 2px 2px 0 #18172e; }
+.result-actions button:disabled { color: #888198; background: #3d3854; border-color: #635c77; box-shadow: none; cursor: not-allowed; }
+.result-status { min-height: 18px; margin: 11px 0 0; color: #a9d8cb; font-size: 12px; line-height: 1.5; }
+
 .toast { position: fixed; top: 22px; left: 50%; z-index: 20; padding: 10px 14px; color: #2d2945; background: #f4cd64; border: 3px solid #fff0a5; box-shadow: 4px 4px 0 #4b375a; font-size: 12px; font-weight: 900; transform: translate(-50%, -15px); opacity: 0; transition: opacity .14s, transform .14s; pointer-events: none; }.toast.visible { transform: translate(-50%, 0); opacity: 1; }
 .hidden { display: none !important; }
 @keyframes blink { 50% { opacity: .35; } }
@@ -76,5 +96,5 @@ input:focus { border-color: #f4cd64; }
 }
 
 @media (max-width: 520px) {
-  .title-logo { top: 28px; }.title-logo h1 { font-size: 49px; }.title-logo > b { margin-top: 13px; font-size: 12px; }.title-actions { bottom: 25px; left: 16px; width: 240px; }.title-room-panel { bottom: 18px; left: 16px; width: calc(100vw - 32px); max-height: calc(100vh - 190px); }.title-action { padding: 11px 12px; font-size: 12px; }.frame-button { right: 8px; left: auto; }.race-board { width: 205px; padding: 6px; }.race-row { grid-template-columns: 10px 12px minmax(0, 1fr) 34px 30px; gap: 2px; }.race-dot { width: 8px; height: 8px; }.game-hud { top: 105px; }.hud-box { min-width: 112px; padding: 7px; }.hud-box strong { font-size: 12px; }.skill-bar.track-mode { right: 8px; bottom: 59px; }.skill-chip { min-width: 96px; padding: 5px 6px; }.message-box { right: 7px; bottom: 6px; left: 7px; padding: 7px 8px; font-size: 12px; }
+  .title-logo { top: 28px; }.title-logo h1 { font-size: 49px; }.title-logo > b { margin-top: 13px; font-size: 12px; }.title-actions { bottom: 25px; left: 16px; width: 240px; }.title-room-panel { bottom: 18px; left: 16px; width: calc(100vw - 32px); max-height: calc(100vh - 190px); }.title-action { padding: 11px 12px; font-size: 12px; }.frame-button { right: 8px; left: auto; }.race-board { width: 205px; padding: 6px; }.race-row { grid-template-columns: 10px 12px minmax(0, 1fr) 34px 30px; gap: 2px; }.race-dot { width: 8px; height: 8px; }.game-hud { top: 105px; }.hud-box { min-width: 112px; padding: 7px; }.hud-box strong { font-size: 12px; }.skill-bar.track-mode { right: 8px; bottom: 59px; }.skill-chip { min-width: 96px; padding: 5px 6px; }.message-box { right: 7px; bottom: 6px; left: 7px; padding: 7px 8px; font-size: 12px; }.match-results { padding: 10px; }.result-card { padding: 15px; }.result-card h2 { font-size: 20px; }.result-row { grid-template-columns: 24px 12px minmax(0, 1fr) auto; gap: 5px; padding: 6px; }.result-actions { grid-template-columns: 1fr; }
 }

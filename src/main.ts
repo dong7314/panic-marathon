@@ -129,6 +129,19 @@ app.innerHTML = `
             <button id="practice-button" class="ghost-button">스킬 연습장 이동</button>
             <button id="back-to-lobby" class="ghost-button">메인 화면으로 돌아가기</button>
           </aside>
+          <section id="match-results" class="match-results hidden" role="dialog" aria-modal="true" aria-labelledby="result-title">
+            <div class="result-card">
+              <span class="result-marker">RACE COMPLETE</span>
+              <h2 id="result-title">경기 종료</h2>
+              <p id="result-summary" class="result-summary"></p>
+              <ol id="result-standings" class="result-standings" aria-label="최종 순위"></ol>
+              <div class="result-actions">
+                <button id="result-rematch" class="result-primary" type="button">같은 방에서 재대결</button>
+                <button id="result-to-title" class="result-secondary" type="button">메인 화면으로</button>
+              </div>
+              <p id="result-status" class="result-status"></p>
+            </div>
+          </section>
         </div>
       </div>
     </main>
@@ -174,6 +187,13 @@ const elements = {
   objective: getElement<HTMLElement>("#objective-value"),
   skillBar: getElement<HTMLElement>("#skill-bar"),
   practice: getElement<HTMLButtonElement>("#practice-button"),
+  results: getElement<HTMLElement>("#match-results"),
+  resultTitle: getElement<HTMLElement>("#result-title"),
+  resultSummary: getElement<HTMLElement>("#result-summary"),
+  resultStandings: getElement<HTMLOListElement>("#result-standings"),
+  resultRematch: getElement<HTMLButtonElement>("#result-rematch"),
+  resultToTitle: getElement<HTMLButtonElement>("#result-to-title"),
+  resultStatus: getElement<HTMLElement>("#result-status"),
   toast: getElement<HTMLElement>("#toast"),
 };
 
@@ -220,6 +240,7 @@ const remotePlayers = new Map<string, RemotePlayer>();
 const multiplayerEndpoint = import.meta.env.VITE_MULTIPLAYER_URL ?? `${window.location.protocol}//${window.location.hostname}:5175`;
 const socket = io(multiplayerEndpoint, { autoConnect: false });
 let activeNetworkRoom: NetworkRoom | undefined;
+let activeNetworkRound = 0;
 let multiplayerActive = false;
 let lastNetworkStateAt = 0;
 let networkSleepUntil = 0;
@@ -1370,12 +1391,54 @@ function updateObjective() {
   elements.objective.textContent = checkpointIndex < checkpoints.length ? `CHECKPOINT ${checkpointIndex + 1}` : "START GATE!";
 }
 
-function finishMatch(winner: string) {
+function finishMatch(winner: string, reason: "completed" | "time-limit" = "completed") {
   if (matchFinished) return;
   matchFinished = true;
   pressedKeys.clear();
   updateObjective();
-  showToast(`★ ${winner} 승리! ${roomConfig.lapLimit}랩을 가장 먼저 완주했습니다. ★`);
+  showToast(reason === "time-limit"
+    ? `★ 시간 종료! ${winner}이(가) 현재 순위 1위입니다. ★`
+    : `★ ${winner} 승리! ${roomConfig.lapLimit}랩을 가장 먼저 완주했습니다. ★`);
+}
+
+function formatRaceDuration(durationMs: number) {
+  const totalSeconds = Math.max(0, Math.floor(durationMs / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor(totalSeconds % 3600 / 60);
+  const seconds = totalSeconds % 60;
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
+    : `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function hideMatchResults() {
+  elements.results.classList.add("hidden");
+  elements.resultRematch.disabled = false;
+}
+
+function showNetworkResults(room: NetworkRoom) {
+  const result = room.result;
+  if (!result || result.standings.length === 0) {
+    hideMatchResults();
+    return;
+  }
+  const winner = result.standings[0];
+  const isHost = room.hostId === socket.id;
+  const wasHidden = elements.results.classList.contains("hidden");
+  elements.resultTitle.textContent = result.reason === "time-limit" ? `${winner.name} 시간 제한 1위!` : `${winner.name} 우승!`;
+  elements.resultSummary.textContent = `${room.config.lapLimit}랩 경기 · ${formatRaceDuration(result.durationMs)} · ${room.code}`;
+  elements.resultStandings.innerHTML = result.standings.map((standing) => {
+    const checkpoint = standing.checkpoint < checkpoints.length ? `CP${standing.checkpoint + 1}` : "START";
+    const progress = standing.completed ? "완주" : `${standing.lap}/${room.config.lapLimit} · ${checkpoint}`;
+    return `<li class="result-row${standing.id === socket.id ? " me" : ""}"><span class="result-place">${standing.place}</span><i class="race-dot" style="background:${standing.color}"></i><span class="result-name">${escapeMarkup(standing.name)}</span><span class="result-progress">${progress}</span></li>`;
+  }).join("");
+  elements.resultRematch.classList.toggle("hidden", !isHost);
+  elements.resultRematch.disabled = room.players.length < 2;
+  elements.resultStatus.textContent = isHost
+    ? room.players.length < 2 ? "재대결에는 최소 2명이 필요합니다." : "방장이 재대결을 시작하면 모든 러너가 같은 방에서 다시 출발합니다."
+    : "방장이 재대결을 시작하기를 기다리거나 메인 화면으로 돌아갈 수 있습니다.";
+  elements.results.classList.remove("hidden");
+  if (wasHidden) window.setTimeout(() => (isHost && room.players.length >= 2 ? elements.resultRematch : elements.resultToTitle).focus(), 0);
 }
 
 function respawnAtCheckpoint(message: string, now: number) {
@@ -1787,9 +1850,9 @@ function updateRaceBoard() {
     return;
   }
   elements.raceBoard.classList.remove("hidden");
-  const playerCheckpoint = checkpointIndex < checkpoints.length ? `CP${checkpointIndex + 1}` : "START";
+  const playerCheckpoint = lap >= roomConfig.lapLimit ? "FIN" : checkpointIndex < checkpoints.length ? `CP${checkpointIndex + 1}` : "START";
   const otherRunners = multiplayerActive
-    ? [...remotePlayers.values()].map((runner) => ({ id: runner.id, name: runner.name, color: runner.color, lap: runner.lap, checkpoint: runner.checkpoint, label: runner.checkpoint < 3 ? `CP${runner.checkpoint + 1}` : "START", me: false }))
+    ? [...remotePlayers.values()].map((runner) => ({ id: runner.id, name: runner.name, color: runner.color, lap: runner.lap, checkpoint: runner.checkpoint, label: runner.lap >= roomConfig.lapLimit ? "FIN" : runner.checkpoint < 3 ? `CP${runner.checkpoint + 1}` : "START", me: false }))
     : testBots.map((bot) => ({ id: bot.id, name: bot.name, color: bot.color, lap: bot.lap, checkpoint: bot.checkpoint, label: bot.routeIndex < 3 ? `CP${bot.routeIndex + 1}` : "START", me: false }));
   const runners = [
     { id: 0, name: player.name, color: player.color, lap, checkpoint: checkpointIndex, label: playerCheckpoint, me: true },
@@ -2042,7 +2105,7 @@ function interpolateRemotePlayers(dt: number) {
 }
 
 function updateNetworkWaitingPanel() {
-  if (!activeNetworkRoom || gameActive) return;
+  if (!activeNetworkRoom || activeNetworkRoom.phase !== "waiting" || gameActive) return;
   const isHost = activeNetworkRoom.hostId === socket.id;
   elements.titleRoomPanel.classList.add("network-waiting");
   elements.titlePanelMarker.textContent = "ONLINE ROOM";
@@ -2078,13 +2141,15 @@ function applyNetworkRoom(room: NetworkRoom) {
     }
     elements.lap.textContent = `${Math.min(lap, roomConfig.lapLimit)} / ${roomConfig.lapLimit} LAP`;
     updateObjective();
-    if (room.finished && room.winner) {
-      finishMatch(room.winner.name);
-    } else if (lap > previousLap) {
+    if (room.phase === "running" && lap > previousLap) {
       showToast(`${lap}랩 완주! 다음 바퀴도 말썽을 피워보자.`);
-    } else if (checkpointIndex > previousCheckpoint) {
+    } else if (room.phase === "running" && checkpointIndex > previousCheckpoint) {
       showToast(checkpointIndex === checkpoints.length ? "마지막 관문 통과! 시작선으로 돌아가세요." : `${checkpointIndex}번째 체크포인트 통과!`);
     }
+  }
+  if (multiplayerActive && gameActive && room.phase === "finished" && room.winner && room.result) {
+    finishMatch(room.winner.name, room.result.reason);
+    showNetworkResults(room);
   }
   if (!gameActive) updateNetworkWaitingPanel();
 }
@@ -2113,7 +2178,7 @@ function ensureSocketConnected() {
   });
 }
 
-function requestNetworkRoom(event: "room:create" | "room:join" | "room:start", payload?: unknown) {
+function requestNetworkRoom(event: "room:create" | "room:join" | "room:start" | "room:rematch", payload?: unknown) {
   return new Promise<NetworkRoom>((resolve, reject) => {
     let settled = false;
     const timeout = window.setTimeout(() => {
@@ -2172,8 +2237,10 @@ function startLocalGame(name: string) {
   const config = roomConfig;
   if (activeNetworkRoom) socket.emit("room:leave");
   activeNetworkRoom = undefined;
+  activeNetworkRound = 0;
   multiplayerActive = false;
   remotePlayers.clear();
+  hideMatchResults();
   const now = performance.now();
   roomConfig = config;
   gameMode = "track";
@@ -2238,13 +2305,14 @@ function startLocalGame(name: string) {
 }
 
 function startNetworkMatch(room: NetworkRoom) {
-  if (multiplayerActive && gameActive && activeNetworkRoom?.code === room.code) {
+  if (multiplayerActive && gameActive && activeNetworkRoom?.code === room.code && activeNetworkRound === room.round) {
     applyNetworkRoom(room);
     return;
   }
   const self = room.players.find((runner) => runner.id === socket.id);
   if (!self) return;
   activeNetworkRoom = room;
+  activeNetworkRound = room.round;
   multiplayerActive = true;
   lastNetworkStateAt = 0;
   networkSleepUntil = 0;
@@ -2258,7 +2326,8 @@ function startNetworkMatch(room: NetworkRoom) {
   const now = performance.now();
   gameMode = "track";
   resetWorldLabels();
-  matchFinished = room.finished;
+  matchFinished = false;
+  hideMatchResults();
   player.name = self.name;
   player.color = self.color;
   player.x = self.x;
@@ -2408,6 +2477,7 @@ function togglePractice() {
 function returnToTitle() {
   if (activeNetworkRoom) socket.emit("room:leave");
   activeNetworkRoom = undefined;
+  activeNetworkRound = 0;
   multiplayerActive = false;
   remotePlayers.clear();
   clones.length = 0;
@@ -2428,6 +2498,7 @@ function returnToTitle() {
   if (document.fullscreenElement) void document.exitFullscreen();
   elements.toast.classList.remove("visible");
   elements.toast.textContent = "";
+  hideMatchResults();
   elements.skillBar.classList.add("hidden");
   elements.practice.textContent = "스킬 연습장 이동";
   elements.game.classList.add("hidden");
@@ -2467,6 +2538,7 @@ function openTitleRoomPanel(mode: TitleRoomMode) {
 function closeTitleRoomPanel() {
   if (activeNetworkRoom && !gameActive) socket.emit("room:leave");
   activeNetworkRoom = undefined;
+  if (!gameActive) activeNetworkRound = 0;
   remotePlayers.clear();
   elements.titleRoomPanel.classList.add("hidden");
   elements.titleRoomPanel.classList.remove("network-waiting");
@@ -2508,7 +2580,7 @@ async function startFromTitleRoomPanel() {
       }
       const room = await requestNetworkRoom("room:join", { code, name: runnerName });
       applyNetworkRoom(room);
-      if (room.started) {
+      if (room.phase === "running") {
         startNetworkMatch(room);
         showToast("TEST 방 입장 완료 · 혼자서도 바로 테스트할 수 있어요.");
         return;
@@ -2530,6 +2602,19 @@ async function startFromTitleRoomPanel() {
     showToast(`방 생성 완료 · 초대 코드 ${room.code}`);
   } catch (error) {
     showToast(error instanceof Error ? error.message : "멀티플레이 방을 열지 못했습니다.");
+  }
+}
+
+async function startNetworkRematch() {
+  if (!activeNetworkRoom || activeNetworkRoom.phase !== "finished" || activeNetworkRoom.hostId !== socket.id) return;
+  elements.resultRematch.disabled = true;
+  elements.resultStatus.textContent = "출발선을 다시 준비하고 있습니다…";
+  try {
+    const room = await requestNetworkRoom("room:rematch");
+    startNetworkMatch(room);
+  } catch (error) {
+    elements.resultRematch.disabled = activeNetworkRoom.players.length < 2;
+    elements.resultStatus.textContent = error instanceof Error ? error.message : "재대결을 시작하지 못했습니다.";
   }
 }
 
@@ -2622,9 +2707,12 @@ elements.titleInviteCode.addEventListener("keydown", (event) => { if (event.key 
 elements.back.addEventListener("click", returnToTitle);
 elements.practice.addEventListener("click", togglePractice);
 elements.fullscreen.addEventListener("click", () => { void toggleFullscreen(); });
+elements.resultRematch.addEventListener("click", () => { void startNetworkRematch(); });
+elements.resultToTitle.addEventListener("click", returnToTitle);
 
 socket.on("room:state", (room: NetworkRoom) => applyNetworkRoom(room));
 socket.on("match:started", (room: NetworkRoom) => startNetworkMatch(room));
+socket.on("match:finished", (room: NetworkRoom) => applyNetworkRoom(room));
 socket.on("hazard:warning", (hazards: NetworkHazards) => {
   syncNetworkHazards(hazards);
   showToast("구덩이 경고! 잠시 후 열린다.");
