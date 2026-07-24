@@ -715,6 +715,13 @@ function drawSlowStatus(context: CanvasRenderingContext2D, x: number, y: number,
   fillRect(context, "#75ddeb", x + 7, y + 4 + pulse, 3, 3);
 }
 
+function drawSleepStatus(context: CanvasRenderingContext2D, x: number, y: number, time: number, until: number) {
+  if (until <= time) return;
+  context.fillStyle = "#e5b8f4";
+  context.font = "bold 8px monospace";
+  context.fillText("Z", Math.round(x + 7), Math.round(y - 10));
+}
+
 function drawPlayer(context: CanvasRenderingContext2D, cameraX: number, cameraY: number, time: number) {
   const playerId = multiplayerActive ? socket.id : LOCAL_GRAPPLE_ID;
   const grappledPosition = getGrappledPosition(playerId, player.x, player.y, time);
@@ -741,6 +748,7 @@ function drawPlayer(context: CanvasRenderingContext2D, cameraX: number, cameraY:
   if (lift > 0) fillRect(context, "rgba(38,31,54,.3)", baseX - 8, baseY + 10, 16, 3);
   drawPerson(context, baseX, drawY, player.direction, player.walking, player.color);
   drawSlowStatus(context, baseX, drawY, time, networkSlowUntil);
+  drawSleepStatus(context, baseX, drawY, time, networkSleepUntil);
   const statusLeft = Math.round(baseX - 12);
   drawHealthPips(context, statusLeft, drawY - 14, player.health);
   drawAmmoPips(context, statusLeft, drawY - 21, player.ammo);
@@ -987,7 +995,14 @@ function getPracticeTargetInAim(maxDistance = GRAB_RANGE, hitRadius = GRAB_HIT_R
   return candidate;
 }
 
+function isLocalActionLocked(now: number) {
+  if (player.fallingUntil > 0 || player.airUntil > now) return true;
+  if (grappleLockUntil > now || pushLockUntil > now) return true;
+  return multiplayerActive && networkSleepUntil > now;
+}
+
 function canUseSkill(id: SkillId, now: number) {
+  if (matchFinished || isLocalActionLocked(now)) return false;
   if (id === "dash") return dashCharges > 0 && now >= skillReadyAt.dash;
   if (id === "clone") return getOwnedCloneCount() < CLONE_LIMIT && now >= skillReadyAt.clone;
   return now >= skillReadyAt[id];
@@ -1004,7 +1019,7 @@ function applySlow(centerX: number, centerY: number, radius: number, now: number
 }
 
 function useSkill(id: SkillId, now = performance.now()) {
-  if (!canUseSkill(id, now) || player.fallingUntil > now) return false;
+  if (!canUseSkill(id, now)) return false;
   const aimVector = getAimVector();
 
   if (multiplayerActive) {
@@ -1188,7 +1203,7 @@ function refillPlayerAmmo() {
 }
 
 function fireBasicShot(now: number) {
-  if (now < player.shotReadyAt || player.fallingUntil > now) return;
+  if (now < player.shotReadyAt || matchFinished || isLocalActionLocked(now)) return;
   if (player.ammo <= 0) {
     showToast("총알을 다 썼다! 구덩이 또는 체크포인트 복귀 시 회복.");
     player.shotReadyAt = now + 220;
@@ -1581,7 +1596,9 @@ function updatePlayer(dt: number, now: number) {
     respawnAtCheckpoint("마지막 체크포인트에서 다시 달린다!", now);
     return;
   }
-  if ((multiplayerActive && networkSleepUntil > now) || grappleLockUntil > now || pushLockUntil > now) return;
+  if (player.airUntil > now) return;
+  if (grappleLockUntil > now || pushLockUntil > now) return;
+  if (multiplayerActive && networkSleepUntil > now) return;
   if (player.dashUntil > now) {
     movePlayer(player.dashVelocityX * dt, player.dashVelocityY * dt);
     player.walking += dt * 24;
@@ -1701,11 +1718,7 @@ function drawTestBot(context: CanvasRenderingContext2D, bot: TestBot, cameraX: n
   drawHealthPips(context, statusLeft, y - 14, bot.health);
   updateRunnerLabels(bot, statusLeft, y - 14);
   drawSlowStatus(context, x, y, time, bot.slowUntil);
-  if (bot.sleepUntil > time) {
-    context.fillStyle = "#e5b8f4";
-    context.font = "bold 8px monospace";
-    context.fillText("Z", Math.round(x + 7), Math.round(y - 10));
-  }
+  drawSleepStatus(context, x, y, time, bot.sleepUntil);
 }
 
 function drawRemotePlayer(context: CanvasRenderingContext2D, runner: RemotePlayer, cameraX: number, cameraY: number, time: number) {
@@ -1732,6 +1745,7 @@ function drawRemotePlayer(context: CanvasRenderingContext2D, runner: RemotePlaye
   if (lift > 0) fillRect(context, "rgba(38,31,54,.3)", baseX - 8, baseY + 10, 16, 3);
   drawPerson(context, x, y, runner.direction, runner.walking, runner.color, true);
   drawSlowStatus(context, x, y, time, runner.slowEffectUntil);
+  drawSleepStatus(context, x, y, time, runner.sleepEffectUntil);
   const statusLeft = Math.round(x - 12);
   drawHealthPips(context, statusLeft, y - 14, runner.health);
   updateRunnerLabels(runner, statusLeft, y - 14);
@@ -2016,6 +2030,19 @@ function syncRemoteHazardState(current: RemotePlayer, runner: NetworkPlayer, rec
   }
 }
 
+function syncRemoteTimedState(current: RemotePlayer, runner: NetworkPlayer, receivedAt: number) {
+  current.slowEffectUntil = receivedAt + Math.max(0, runner.slowMs ?? 0);
+  current.sleepEffectUntil = receivedAt + Math.max(0, runner.sleepMs ?? 0);
+}
+
+function syncPlayerTimedState(runner: NetworkPlayer, receivedAt: number) {
+  networkSleepUntil = receivedAt + Math.max(0, runner.sleepMs ?? 0);
+  networkSlowUntil = receivedAt + Math.max(0, runner.slowMs ?? 0);
+  runUntil = receivedAt + Math.max(0, runner.runMs ?? 0);
+  grappleLockUntil = receivedAt + Math.max(0, runner.grappleMs ?? 0);
+  pushLockUntil = receivedAt + Math.max(0, runner.pushMs ?? 0);
+}
+
 function syncPlayerHazardState(runner: NetworkPlayer, receivedAt: number) {
   const fallingMs = Math.max(0, runner.fallingMs ?? 0);
   if (fallingMs > 0) {
@@ -2066,8 +2093,10 @@ function upsertRemotePlayer(runner: NetworkPlayer) {
       airStartedAt: 0,
       airUntil: 0,
       slowEffectUntil: 0,
+      sleepEffectUntil: 0,
     };
     syncRemoteHazardState(created, runner, receivedAt);
+    syncRemoteTimedState(created, runner, receivedAt);
     remotePlayers.set(runner.id, created);
     return;
   }
@@ -2087,6 +2116,7 @@ function upsertRemotePlayer(runner: NetworkPlayer) {
   current.targetY = runner.y;
   current.targetWalking = runner.walking;
   syncRemoteHazardState(current, runner, receivedAt);
+  syncRemoteTimedState(current, runner, receivedAt);
 }
 
 function interpolateRemotePlayers(dt: number) {
@@ -2125,6 +2155,7 @@ function applyNetworkRoom(room: NetworkRoom) {
     const previousLap = lap;
     const previousCheckpoint = checkpointIndex;
     const receivedAt = performance.now();
+    syncPlayerTimedState(self, receivedAt);
     syncPlayerHazardState(self, receivedAt);
     player.color = self.color;
     player.health = self.health;
@@ -2200,7 +2231,7 @@ function requestNetworkRoom(event: "room:create" | "room:join" | "room:start" | 
 }
 
 function sendLocalNetworkState(now: number) {
-  if (!multiplayerActive || !socket.connected || player.dashUntil > now || grappleLockUntil > now || pushLockUntil > now || now - lastNetworkStateAt < 55) return;
+  if (!multiplayerActive || !socket.connected || player.dashUntil > now || isLocalActionLocked(now) || now - lastNetworkStateAt < 55) return;
   lastNetworkStateAt = now;
   socket.emit("player:state", {
     x: player.x,
@@ -2367,6 +2398,7 @@ function startNetworkMatch(room: NetworkRoom) {
   pitOpenedAlertIndex = -1;
   pitOpenedAlertUntil = 0;
   syncNetworkHazards(room.hazards);
+  syncPlayerTimedState(self, now);
   syncPlayerHazardState(self, now);
   jumpPadCooldownUntil = 0;
   aim.visible = false;
@@ -2631,12 +2663,23 @@ document.addEventListener("fullscreenchange", () => {
   elements.fullscreen.textContent = document.fullscreenElement ? "전체 화면 종료" : "전체 화면";
 });
 
+function clearNetworkControlEffects(playerId: string) {
+  for (let index = grappleEffects.length - 1; index >= 0; index -= 1) {
+    const effect = grappleEffects[index];
+    if (effect.sourceId === playerId || effect.targetId === playerId) grappleEffects.splice(index, 1);
+  }
+  for (let index = pushEffects.length - 1; index >= 0; index -= 1) {
+    if (pushEffects[index].targetId === playerId) pushEffects.splice(index, 1);
+  }
+}
+
 function applyNetworkHazardEffect(effect: HazardEffect) {
   if (!multiplayerActive) return;
   const now = performance.now();
   const isSelf = effect.playerId === socket.id;
   const remote = remotePlayers.get(effect.playerId);
   if (effect.kind === "pit") {
+    clearNetworkControlEffects(effect.playerId);
     if (isSelf) {
       player.fallingStartedAt = now;
       player.fallingUntil = now + effect.duration;
@@ -2645,6 +2688,12 @@ function applyNetworkHazardEffect(effect: HazardEffect) {
       player.knockbackX = 0;
       player.knockbackY = 0;
       player.airUntil = 0;
+      player.dashUntil = 0;
+      networkSleepUntil = 0;
+      networkSlowUntil = 0;
+      runUntil = 0;
+      grappleLockUntil = 0;
+      pushLockUntil = 0;
       player.hitUntil = now + effect.duration;
       showToast("구덩이에 빨려 들어간다!");
     }
@@ -2654,24 +2703,49 @@ function applyNetworkHazardEffect(effect: HazardEffect) {
       remote.fallTargetX = effect.targetX;
       remote.fallTargetY = effect.targetY;
       remote.airUntil = 0;
+      remote.sleepEffectUntil = 0;
+      remote.slowEffectUntil = 0;
     }
     return;
   }
   if (effect.kind === "jump") {
+    clearNetworkControlEffects(effect.playerId);
+    pushEffects.push({
+      sourceId: "hazard:jump",
+      targetId: effect.playerId,
+      startX: effect.startX,
+      startY: effect.startY,
+      endX: effect.endX,
+      endY: effect.endY,
+      duration: effect.duration,
+      startedAt: now,
+      until: now + effect.duration,
+    });
     if (isSelf) {
-      player.knockbackX = effect.pushX;
-      player.knockbackY = effect.pushY;
+      player.x = effect.endX;
+      player.y = effect.endY;
+      player.knockbackX = 0;
+      player.knockbackY = 0;
       player.airStartedAt = now;
       player.airUntil = now + effect.duration;
+      networkSleepUntil = 0;
+      grappleLockUntil = 0;
+      pushLockUntil = 0;
       player.hitUntil = now + effect.duration;
       showToast("점프대에 떠올라 뒤로 날아간다!");
     }
     if (remote) {
+      remote.x = effect.endX;
+      remote.y = effect.endY;
+      remote.targetX = effect.endX;
+      remote.targetY = effect.endY;
       remote.airStartedAt = now;
       remote.airUntil = now + effect.duration;
+      remote.sleepEffectUntil = 0;
     }
     return;
   }
+  clearNetworkControlEffects(effect.playerId);
   if (isSelf) {
     player.x = effect.x;
     player.y = effect.y;
@@ -2680,6 +2754,12 @@ function applyNetworkHazardEffect(effect: HazardEffect) {
     player.airUntil = 0;
     player.knockbackX = 0;
     player.knockbackY = 0;
+    player.dashUntil = 0;
+    networkSleepUntil = 0;
+    networkSlowUntil = 0;
+    runUntil = 0;
+    grappleLockUntil = 0;
+    pushLockUntil = 0;
     player.hitUntil = now + 550;
     showToast("마지막 체크포인트에서 다시 달린다!");
   }
@@ -2690,6 +2770,8 @@ function applyNetworkHazardEffect(effect: HazardEffect) {
     remote.targetY = effect.y;
     remote.fallingUntil = 0;
     remote.airUntil = 0;
+    remote.sleepEffectUntil = 0;
+    remote.slowEffectUntil = 0;
   }
 }
 
@@ -2794,10 +2876,38 @@ socket.on("combat:effect", (effect: { kind: "bullet" | SkillId; sourceId: string
   const hitMe = socket.id ? effect.targetIds.includes(socket.id) : false;
   if (hitMe && effect.kind === "sleep") networkSleepUntil = now + (effect.duration ?? 2000);
   if (hitMe && effect.kind === "slow") networkSlowUntil = now + (effect.duration ?? 3600);
+  if (effect.kind === "sleep") {
+    for (const targetId of effect.targetIds) {
+      const target = remotePlayers.get(targetId);
+      if (target) target.sleepEffectUntil = Math.max(target.sleepEffectUntil, now + (effect.duration ?? 2000));
+    }
+  }
   if (effect.kind === "slow") {
     for (const targetId of effect.targetIds) {
       const target = remotePlayers.get(targetId);
       if (target) target.slowEffectUntil = Math.max(target.slowEffectUntil, now + (effect.duration ?? 3600));
+    }
+  }
+  if (effect.kind === "bullet" && effect.defeated) {
+    for (const targetId of effect.targetIds) {
+      clearNetworkControlEffects(targetId);
+      const target = remotePlayers.get(targetId);
+      if (target) {
+        target.fallingUntil = 0;
+        target.airUntil = 0;
+        target.sleepEffectUntil = 0;
+        target.slowEffectUntil = 0;
+      }
+    }
+    if (hitMe) {
+      player.fallingUntil = 0;
+      player.airUntil = 0;
+      player.dashUntil = 0;
+      networkSleepUntil = 0;
+      networkSlowUntil = 0;
+      runUntil = 0;
+      grappleLockUntil = 0;
+      pushLockUntil = 0;
     }
   }
   if (effect.kind === "bullet" && hitMe) showToast(effect.defeated ? "처치당했습니다! 체크포인트에서 부활." : "총알에 맞았다!");

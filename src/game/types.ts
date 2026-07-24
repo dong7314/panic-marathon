@@ -1,4 +1,5 @@
 import type { SkillId } from "../../shared/game-rules.mjs";
+import type { PlayerActionState } from "../../shared/player-state.mjs";
 
 export type Direction = "down" | "up" | "left" | "right";
 export type PropKind = "vending" | "bench" | "crate" | "plant" | "table" | "lamp" | "sofa" | "mailbox" | "arcade";
@@ -62,12 +63,23 @@ export type NetworkPlayer = {
   cloneCount?: number;
   dashCharges?: number;
   dashRechargeMs?: number;
+  actionState?: PlayerActionState;
+  actionStateMs?: number;
+  grappleMs?: number;
+  pushMs?: number;
+  sleepMs?: number;
+  slowMs?: number;
+  runMs?: number;
   fallingMs?: number;
   fallingElapsedMs?: number;
   fallTargetX?: number;
   fallTargetY?: number;
   airMs?: number;
   airElapsedMs?: number;
+  airStartX?: number;
+  airStartY?: number;
+  airEndX?: number;
+  airEndY?: number;
 };
 
 export type NetworkClone = { id: string; ownerId: string; x: number; y: number; direction: Direction; until: number };
@@ -101,6 +113,7 @@ export type RemotePlayer = NetworkPlayer & {
   airStartedAt: number;
   airUntil: number;
   slowEffectUntil: number;
+  sleepEffectUntil: number;
 };
 
 export type NetworkRoom = {
@@ -124,5 +137,5 @@ export type PushEffect = { sourceId: string; targetId: string; startX: number; s
 export type SlowImpact = { x: number; y: number; startedAt: number; until: number };
 export type HazardEffect =
   | { kind: "pit"; playerId: string; duration: number; targetX: number; targetY: number }
-  | { kind: "jump"; playerId: string; duration: number; pushX: number; pushY: number }
+  | { kind: "jump"; playerId: string; duration: number; startX: number; startY: number; endX: number; endY: number }
   | { kind: "respawn"; playerId: string; x: number; y: number; ammo: number };
