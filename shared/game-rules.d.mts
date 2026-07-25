@@ -36,6 +36,11 @@ export const PIT_CYCLE_MIN_DELAY: number;
 export const PIT_CYCLE_RANDOM_DELAY: number;
 export const SKILL_IDS: readonly SkillId[];
 export const PLAYER_COLORS: readonly string[];
+export function pickNextSkill(
+  skills: readonly SkillId[],
+  previousSkill?: SkillId,
+  random?: () => number,
+): SkillId;
 export const TRACK: TrackBounds;
 export const START_POINT: Point;
 export const SPAWN_POINTS: readonly Point[];

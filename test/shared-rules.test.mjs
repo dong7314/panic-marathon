@@ -5,10 +5,12 @@ import {
   CHECKPOINTS,
   CLONE_LIMIT,
   MATCH_TIME_LIMIT,
+  PIT_WARNING_DURATION,
   PIT_ZONES,
   SKILL_IDS,
   SPINNER_RULES,
   START_POINT,
+  pickNextSkill,
 } from "../shared/game-rules.mjs";
 import { canStandOnTrack, isTrackPoint, pointSegmentDistance } from "../shared/geometry.mjs";
 import { getMovementLimit, isMovementAllowed } from "../shared/movement-validation.mjs";
@@ -17,10 +19,22 @@ test("shared race rules expose the expected playable layout", () => {
   assert.equal(SKILL_IDS.length, 7);
   assert.equal(CLONE_LIMIT, 20);
   assert.equal(MATCH_TIME_LIMIT, 60 * 60 * 1000);
+  assert.equal(PIT_WARNING_DURATION, 4_000);
   assert.equal(CHECKPOINTS.length, 3);
   assert.equal(PIT_ZONES.length, 4);
   assert.equal(SPINNER_RULES.length, 3);
   assert.equal(canStandOnTrack(START_POINT.x, START_POINT.y), true);
+});
+
+test("checkpoint skill rolls always exclude the previous skill", () => {
+  const skills = ["push", "dash", "run"];
+  for (const previousSkill of skills) {
+    for (const randomValue of [0, 0.25, 0.5, 0.75, 0.999]) {
+      assert.notEqual(pickNextSkill(skills, previousSkill, () => randomValue), previousSkill);
+    }
+  }
+  assert.equal(pickNextSkill(["sleep"], "sleep", () => 0), "sleep");
+  assert.equal(pickNextSkill([], undefined, () => 0), "push");
 });
 
 test("track geometry rejects the infield and world exterior", () => {

@@ -2,6 +2,7 @@
  * Rules that must stay identical on the browser and multiplayer server.
  * Keep this module runtime-only so Node and Vite can import the same source.
  */
+import { MAP_DEFINITIONS } from "./map-catalog.mjs";
 
 export const WORLD_WIDTH = 1344;
 export const WORLD_HEIGHT = 1008;
@@ -23,13 +24,19 @@ export const MATCH_TIME_LIMIT = 60 * 60 * 1000;
 
 export const PIT_FALL_DURATION = 520;
 export const JUMP_DURATION = 560;
-export const PIT_WARNING_DURATION = 900;
+export const PIT_WARNING_DURATION = 4000;
 export const FIRST_PIT_WARNING_DELAY = 2500;
 export const PIT_CYCLE_MIN_DELAY = 4000;
 export const PIT_CYCLE_RANDOM_DELAY = 2000;
 
 export const SKILL_IDS = Object.freeze(["push", "dash", "run", "grab", "clone", "slow", "sleep"]);
 export const PLAYER_COLORS = Object.freeze(["#f16c7a", "#f4c562", "#78d8e9", "#a985e6", "#e58fba", "#8edb8a"]);
+
+export function pickNextSkill(skills, previousSkill, random = Math.random) {
+  const differentSkills = skills.filter((skill) => skill !== previousSkill);
+  const candidates = differentSkills.length > 0 ? differentSkills : skills;
+  return candidates[Math.floor(random() * candidates.length)] ?? "push";
+}
 
 export const TRACK = Object.freeze({
   outerLeft: 32,
@@ -68,19 +75,6 @@ export const CHECKPOINTS = Object.freeze([
 
 export const START_GATE = Object.freeze({ x: 128, y: 810, width: 62, height: 82 });
 
-export const PIT_ZONES = Object.freeze([
-  Object.freeze({ x: 260, y: 836, width: 34, height: 36 }),
-  Object.freeze({ x: 1168, y: 350, width: 34, height: 31 }),
-  Object.freeze({ x: 115, y: 510, width: 34, height: 31 }),
-  Object.freeze({ x: 840, y: 88, width: 34, height: 34 }),
-]);
-
-export const JUMP_PADS = Object.freeze([
-  Object.freeze({ x: 920, y: 836, width: 40, height: 30, pushX: -320, pushY: 0 }),
-]);
-
-export const SPINNER_RULES = Object.freeze([
-  Object.freeze({ x: 650, y: 856, radius: 52, speed: 2.15 }),
-  Object.freeze({ x: 1190, y: 492, radius: 48, speed: -2.8 }),
-  Object.freeze({ x: 660, y: 112, radius: 48, speed: 3.1 }),
-]);
+export const PIT_ZONES = MAP_DEFINITIONS.schoolyard.pitZones;
+export const JUMP_PADS = MAP_DEFINITIONS.schoolyard.jumpPads;
+export const SPINNER_RULES = MAP_DEFINITIONS.schoolyard.spinners;
