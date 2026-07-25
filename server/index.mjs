@@ -9,6 +9,11 @@ import {
   selectNextHost,
 } from "./player-session.mjs";
 import {
+  createRoomState,
+  normalizeRoomCode,
+  sanitizePlayerName,
+} from "./room-state.mjs";
+import {
   CHECKPOINTS,
   CLONE_COOLDOWN,
   CLONE_DURATION,
@@ -18,12 +23,10 @@ import {
   GRAB_HIT_RADIUS,
   GRAB_RANGE,
   JUMP_DURATION,
-  JUMP_PADS,
   PIT_CYCLE_MIN_DELAY,
   PIT_CYCLE_RANDOM_DELAY,
   PIT_FALL_DURATION,
   PIT_WARNING_DURATION,
-  PIT_ZONES as PITS,
   PLAYER_COLORS as COLORS,
   PUSH_DISTANCE,
   PUSH_DURATION,
@@ -31,11 +34,12 @@ import {
   RUN_DURATION,
   SKILL_IDS,
   SPAWN_POINTS as SPAWNS,
-  SPINNER_RULES,
   START_GATE,
   WORLD_HEIGHT,
   WORLD_WIDTH,
+  pickNextSkill,
 } from "../shared/game-rules.mjs";
+import { DEFAULT_MAP_ID, getMapDefinition } from "../shared/map-catalog.mjs";
 import { canStandOnTrack, pointSegmentDistance } from "../shared/geometry.mjs";
 import { isMovementAllowed } from "../shared/movement-validation.mjs";
 import {
@@ -66,12 +70,18 @@ function runtimeStatus() {
     playerCount += room.players.size;
     connectedPlayerCount += countConnectedPlayers(room.players);
   }
+  const memory = process.memoryUsage();
   return {
     uptimeMs: Date.now() - serverStartedAt,
     rooms: rooms.size,
     players: playerCount,
     connectedPlayers: connectedPlayerCount,
     socketConnections: io?.engine?.clientsCount ?? 0,
+    memory: {
+      rssMb: Math.round(memory.rss / 1024 / 1024 * 10) / 10,
+      heapUsedMb: Math.round(memory.heapUsed / 1024 / 1024 * 10) / 10,
+      heapTotalMb: Math.round(memory.heapTotal / 1024 / 1024 * 10) / 10,
+    },
     phases,
   };
 }
@@ -84,10 +94,6 @@ const io = new Server(httpServer, {
   cors: { origin: config.clientOrigins, methods: ["GET", "POST"] },
 });
 
-function normalizeCode(value) {
-  return String(value ?? "").trim().toUpperCase().replace(/[^A-Z0-9-]/g, "").slice(0, 12);
-}
-
 function makeCode() {
   let code = "";
   do code = `PM-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
@@ -95,21 +101,12 @@ function makeCode() {
   return code;
 }
 
-function sanitizeName(value) {
-  const name = String(value ?? "").trim().replace(/\s+/g, " ").slice(0, 10);
-  return name || "말썽꾸러기";
+function mapForRoom(room) {
+  return getMapDefinition(room.config.mapId);
 }
 
-function sanitizeConfig(value) {
-  const lapLimit = Math.max(1, Math.min(999, Math.floor(Number(value?.lapLimit) || 5)));
-  const playerCount = Math.max(2, Math.min(6, Math.floor(Number(value?.playerCount) || 4)));
-  const enabledSkills = [...new Set(Array.isArray(value?.enabledSkills) ? value.enabledSkills.filter((skill) => SKILLS.has(skill)) : [])];
-  return { lapLimit, playerCount, enabledSkills: enabledSkills.length >= 3 ? enabledSkills : ["push", "dash", "run"] };
-}
-
-function rollSkill(room) {
-  const skills = room.config.enabledSkills;
-  return skills[Math.floor(Math.random() * skills.length)] ?? "push";
+function rollSkill(room, previousSkill) {
+  return pickNextSkill(room.config.enabledSkills, previousSkill);
 }
 
 function createHazardState(now = Date.now()) {
@@ -277,7 +274,7 @@ function addPlayer(room, socket, name) {
     socketId: undefined,
     connected: false,
     reconnectDeadline: 0,
-    name: sanitizeName(name),
+    name: sanitizePlayerName(name),
     color: COLORS[index % COLORS.length],
     joinOrder: room.nextJoinOrder++,
     x: spawn.x,
@@ -324,7 +321,7 @@ function resetPlayers(room, now = Date.now()) {
     player.walking = index;
     player.health = 5;
     player.ammo = 3;
-    player.skill = rollSkill(room);
+    player.skill = rollSkill(room, player.skill);
     player.lap = 0;
     player.checkpoint = 0;
     player.lastUpdateAt = now;
@@ -710,22 +707,23 @@ function triggerSpinnerKnockback(room, player, spinner, spinnerIndex, now) {
 }
 
 function updatePlayerHazards(room, player, now) {
+  const map = mapForRoom(room);
   const actionState = getPlayerActionState(player, now);
   if (actionState === "falling" || actionState === "airborne") return false;
-  const activePit = PITS[room.hazards.activePitIndex];
+  const activePit = map.pitZones[room.hazards.activePitIndex];
   if (activePit && playerTouchesZone(player, activePit, 4)) {
     triggerPitFall(room, player, activePit, now);
     return true;
   }
   if (player.jumpPadCooldownUntil <= now) {
-    const jumpPad = JUMP_PADS.find((pad) => playerTouchesZone(player, pad, 2));
+    const jumpPad = map.jumpPads.find((pad) => playerTouchesZone(player, pad, 2));
     if (jumpPad) {
       triggerJumpPad(room, player, jumpPad, now);
       return true;
     }
   }
   if (canPlayerBeDisplaced(player, now) && player.spinnerImmuneUntil <= now) {
-    const spinnerIndex = SPINNER_RULES.findIndex((spinner, index) => triggerSpinnerKnockback(room, player, spinner, index, now));
+    const spinnerIndex = map.spinners.findIndex((spinner, index) => triggerSpinnerKnockback(room, player, spinner, index, now));
     if (spinnerIndex >= 0) return true;
   }
   return false;
@@ -736,10 +734,11 @@ function resetRoomHazards(room, now = Date.now()) {
 }
 
 function findNearestPitIndex(room) {
+  const pitZones = mapForRoom(room).pitZones;
   let selectedIndex = 0;
   let selectedDistance = Number.POSITIVE_INFINITY;
-  for (let index = 0; index < PITS.length; index += 1) {
-    const pit = PITS[index];
+  for (let index = 0; index < pitZones.length; index += 1) {
+    const pit = pitZones[index];
     const centerX = pit.x + pit.width / 2;
     const centerY = pit.y + pit.height / 2;
     for (const player of room.players.values()) {
@@ -779,7 +778,7 @@ function updateRaceProgress(room, player, now = Date.now()) {
   if (checkpoint && playerTouchesZone(player, checkpoint, 8)) {
     player.checkpoint += 1;
     player.ammo = 3;
-    player.skill = rollSkill(room);
+    player.skill = rollSkill(room, player.skill);
     player.nextSkillAt = 0;
     player.dashCharges = 3;
     player.dashRechargeAt = 0;
@@ -804,7 +803,7 @@ function ack(callback, value) {
 io.on("connection", (socket) => {
   socket.on("room:create", (payload, callback) => {
     leaveCurrentRoom(socket);
-    const requestedCode = normalizeCode(payload?.code);
+    const requestedCode = normalizeRoomCode(payload?.code);
     const code = requestedCode.length >= 4 ? requestedCode : makeCode();
     if (code === TEST_ROOM_CODE) {
       ack(callback, { ok: false, error: "TEST는 참여하기에서만 사용할 수 있는 테스트 방입니다." });
@@ -814,21 +813,11 @@ io.on("connection", (socket) => {
       ack(callback, { ok: false, error: "이미 사용 중인 초대 코드입니다." });
       return;
     }
-    const room = {
+    const room = createRoomState({
       code,
-      hostId: undefined,
-      config: sanitizeConfig(payload?.config),
-      players: new Map(),
-      nextJoinOrder: 0,
-      clones: [],
-      projectiles: [],
-      phase: "waiting",
-      round: 0,
-      result: null,
-      matchStartedAt: 0,
-      countdownEndsAt: 0,
-      hazards: createHazardState(),
-    };
+      config: payload?.config,
+      createHazardState,
+    });
     rooms.set(code, room);
     const player = addPlayer(room, socket, payload?.name);
     room.hostId = player.id;
@@ -839,24 +828,21 @@ io.on("connection", (socket) => {
 
   socket.on("room:join", (payload, callback) => {
     leaveCurrentRoom(socket);
-    const code = normalizeCode(payload?.code);
+    const code = normalizeRoomCode(payload?.code);
     let room = rooms.get(code);
     if (code === TEST_ROOM_CODE && !room) {
-      room = {
+      room = createRoomState({
         code: TEST_ROOM_CODE,
-        hostId: undefined,
-        config: { lapLimit: 5, playerCount: 6, enabledSkills: [...SKILLS] },
-        players: new Map(),
-        nextJoinOrder: 0,
-        clones: [],
-        projectiles: [],
+        config: {
+          lapLimit: 5,
+          playerCount: 6,
+          mapId: DEFAULT_MAP_ID,
+          enabledSkills: [...SKILLS],
+        },
         phase: "running",
         round: 1,
-        result: null,
-        matchStartedAt: Date.now(),
-        countdownEndsAt: 0,
-        hazards: createHazardState(),
-      };
+        createHazardState,
+      });
       rooms.set(TEST_ROOM_CODE, room);
     }
     if (!room) {
@@ -883,7 +869,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("room:resume", (payload, callback) => {
-    const code = normalizeCode(payload?.roomCode);
+    const code = normalizeRoomCode(payload?.roomCode);
     const playerId = String(payload?.playerId ?? "");
     const reconnectToken = String(payload?.reconnectToken ?? "");
     const room = rooms.get(code);
