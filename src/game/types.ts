@@ -80,6 +80,8 @@ export type NetworkPlayer = {
   airStartY?: number;
   airEndX?: number;
   airEndY?: number;
+  connected: boolean;
+  reconnectMs: number;
 };
 
 export type NetworkClone = { id: string; ownerId: string; x: number; y: number; direction: Direction; until: number };
@@ -131,8 +133,9 @@ export type NetworkRoom = {
   players: NetworkPlayer[];
   clones: NetworkClone[];
 };
-export type NetworkResponse = { ok: true; room: NetworkRoom } | { ok: false; error: string };
-export type LabelledRunner = Pick<TestBot, "id" | "name" | "skill"> | Pick<RemotePlayer, "id" | "name" | "skill" | "skillCooldownUntil" | "cloneCount" | "dashCharges" | "dashRechargeUntil">;
+export type NetworkSession = { roomCode: string; playerId: string; reconnectToken: string };
+export type NetworkResponse = { ok: true; room: NetworkRoom; session?: NetworkSession } | { ok: false; error: string };
+export type LabelledRunner = Pick<TestBot, "id" | "name" | "skill"> | Pick<RemotePlayer, "id" | "name" | "skill" | "skillCooldownUntil" | "cloneCount" | "dashCharges" | "dashRechargeUntil" | "connected">;
 export type GrappleEffect = { sourceId: string | number; targetId?: string | number; sourceX: number; sourceY: number; hookX: number; hookY: number; targetStartX?: number; targetStartY?: number; targetEndX?: number; targetEndY?: number; startedAt: number; until: number };
 export type PushEffect = { sourceId: string; targetId: string; startX: number; startY: number; endX: number; endY: number; duration: number; startedAt: number; until: number };
 export type SlowImpact = { x: number; y: number; startedAt: number; until: number };

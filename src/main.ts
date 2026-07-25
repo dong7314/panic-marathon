@@ -28,6 +28,12 @@ import {
   type SkillId,
 } from "../shared/game-rules.mjs";
 import { insideRect, isTrackPoint, pointSegmentDistance } from "../shared/geometry.mjs";
+import { MatchCountdown } from "./game/match-countdown";
+import {
+  countConnectedPlayers,
+  NetworkSessionStore,
+  resolveMultiplayerEndpoint,
+} from "./game/network-session";
 import type {
   AimState,
   Clone,
@@ -41,6 +47,7 @@ import type {
   NetworkPlayer,
   NetworkResponse,
   NetworkRoom,
+  NetworkSession,
   Pit,
   Player,
   Projectile,
@@ -242,11 +249,18 @@ const LOCAL_GRAPPLE_ID = "local-player";
 type BotWorldLabelGroup = { container: HTMLDivElement; name: HTMLSpanElement; skill: HTMLSpanElement };
 const botWorldLabels = new Map<string | number, BotWorldLabelGroup>();
 const remotePlayers = new Map<string, RemotePlayer>();
-const multiplayerEndpoint = import.meta.env.VITE_MULTIPLAYER_URL ?? `${window.location.protocol}//${window.location.hostname}:5175`;
+const multiplayerEndpoint = resolveMultiplayerEndpoint(
+  window.location,
+  import.meta.env.VITE_MULTIPLAYER_URL,
+  import.meta.env.DEV,
+);
 const socket = io(multiplayerEndpoint, { autoConnect: false });
+const networkSessionStore = new NetworkSessionStore(window.sessionStorage);
+let activeNetworkSession = networkSessionStore.current;
 let activeNetworkRoom: NetworkRoom | undefined;
 let activeNetworkRound = 0;
 let multiplayerActive = false;
+let networkResumeInFlight = false;
 let lastNetworkStateAt = 0;
 let networkSleepUntil = 0;
 let networkSlowUntil = 0;
@@ -254,8 +268,7 @@ let grappleLockUntil = 0;
 let pushLockUntil = 0;
 let networkSpinnerElapsedAtSync = 0;
 let networkSpinnerSyncedAt = 0;
-let networkCountdownUntil = 0;
-let networkStartBannerUntil = 0;
+const matchCountdown = new MatchCountdown();
 const clones: Clone[] = [];
 const projectiles: Projectile[] = [];
 const grappleEffects: GrappleEffect[] = [];
@@ -661,7 +674,7 @@ function updateRunnerLabels(runner: LabelledRunner, left: number, y: number) {
     labels = { container, name, skill };
     botWorldLabels.set(runner.id, labels);
   }
-  labels.name.textContent = runner.name;
+  labels.name.textContent = "connected" in runner && !runner.connected ? `${runner.name} · 재접속 중` : runner.name;
   const status = "skillCooldownUntil" in runner
     ? { cooldownUntil: runner.skillCooldownUntil, cloneCount: multiplayerActive ? clones.filter((clone) => clone.ownerId === runner.id).length : runner.cloneCount, dashCharges: runner.dashCharges, dashRechargeUntil: runner.dashRechargeUntil }
     : {};
@@ -676,7 +689,8 @@ function resetWorldLabels() {
 }
 
 function getOwnedCloneCount() {
-  return multiplayerActive ? clones.filter((clone) => clone.ownerId === socket.id).length : clones.length;
+  const playerId = getLocalNetworkPlayerId();
+  return multiplayerActive ? clones.filter((clone) => clone.ownerId === playerId).length : clones.length;
 }
 
 function getGrappledPosition(id: string | number | undefined, fallbackX: number, fallbackY: number, now: number) {
@@ -730,7 +744,7 @@ function drawSleepStatus(context: CanvasRenderingContext2D, x: number, y: number
 }
 
 function drawPlayer(context: CanvasRenderingContext2D, cameraX: number, cameraY: number, time: number) {
-  const playerId = multiplayerActive ? socket.id : LOCAL_GRAPPLE_ID;
+  const playerId = multiplayerActive ? getLocalNetworkPlayerId() : LOCAL_GRAPPLE_ID;
   const grappledPosition = getGrappledPosition(playerId, player.x, player.y, time);
   const position = getPushedPosition(playerId, grappledPosition.x, grappledPosition.y, time);
   const baseX = position.x - cameraX;
@@ -1005,6 +1019,7 @@ function getPracticeTargetInAim(maxDistance = GRAB_RANGE, hitRadius = GRAB_HIT_R
 function isLocalActionLocked(now: number) {
   if (player.fallingUntil > 0 || player.airUntil > now) return true;
   if (grappleLockUntil > now || pushLockUntil > now) return true;
+  if (multiplayerActive && (!socket.connected || networkResumeInFlight)) return true;
   return multiplayerActive && networkSleepUntil > now;
 }
 
@@ -1048,10 +1063,10 @@ function useSkill(id: SkillId, now = performance.now()) {
     else if (id === "clone") skillReadyAt.clone = now + CLONE_COOLDOWN;
     else if (id === "slow") {
       skillReadyAt.slow = now + 4600;
-      projectiles.push({ kind: "slow", owner: "player", sourceId: socket.id, visualOnly: true, x: player.x, y: player.y - 2, velocityX: aimVector.x * 265, velocityY: aimVector.y * 265, until: now + 760, radius: 72 });
+      projectiles.push({ kind: "slow", owner: "player", sourceId: getLocalNetworkPlayerId(), visualOnly: true, x: player.x, y: player.y - 2, velocityX: aimVector.x * 265, velocityY: aimVector.y * 265, until: now + 760, radius: 72 });
     } else {
       skillReadyAt.sleep = now + 2000;
-      projectiles.push({ kind: "sleep", owner: "player", sourceId: socket.id, visualOnly: true, x: player.x, y: player.y - 2, velocityX: aimVector.x * 345, velocityY: aimVector.y * 345, until: now + 680, radius: 0 });
+      projectiles.push({ kind: "sleep", owner: "player", sourceId: getLocalNetworkPlayerId(), visualOnly: true, x: player.x, y: player.y - 2, velocityX: aimVector.x * 345, velocityY: aimVector.y * 345, until: now + 680, radius: 0 });
     }
     aim.pulseX = player.x;
     aim.pulseY = player.y;
@@ -1445,22 +1460,24 @@ function showNetworkResults(room: NetworkRoom) {
     return;
   }
   const winner = result.standings[0];
-  const isHost = room.hostId === socket.id;
+  const playerId = getLocalNetworkPlayerId();
+  const isHost = room.hostId === playerId;
+  const connectedPlayers = countConnectedPlayers(room);
   const wasHidden = elements.results.classList.contains("hidden");
   elements.resultTitle.textContent = result.reason === "time-limit" ? `${winner.name} 시간 제한 1위!` : `${winner.name} 우승!`;
   elements.resultSummary.textContent = `${room.config.lapLimit}랩 경기 · ${formatRaceDuration(result.durationMs)} · ${room.code}`;
   elements.resultStandings.innerHTML = result.standings.map((standing) => {
     const checkpoint = standing.checkpoint < checkpoints.length ? `CP${standing.checkpoint + 1}` : "START";
     const progress = standing.completed ? "완주" : `${standing.lap}/${room.config.lapLimit} · ${checkpoint}`;
-    return `<li class="result-row${standing.id === socket.id ? " me" : ""}"><span class="result-place">${standing.place}</span><i class="race-dot" style="background:${standing.color}"></i><span class="result-name">${escapeMarkup(standing.name)}</span><span class="result-progress">${progress}</span></li>`;
+    return `<li class="result-row${standing.id === playerId ? " me" : ""}"><span class="result-place">${standing.place}</span><i class="race-dot" style="background:${standing.color}"></i><span class="result-name">${escapeMarkup(standing.name)}</span><span class="result-progress">${progress}</span></li>`;
   }).join("");
   elements.resultRematch.classList.toggle("hidden", !isHost);
-  elements.resultRematch.disabled = room.players.length < 2;
+  elements.resultRematch.disabled = connectedPlayers < 2;
   elements.resultStatus.textContent = isHost
-    ? room.players.length < 2 ? "재대결에는 최소 2명이 필요합니다." : "방장이 재대결을 시작하면 모든 러너가 같은 방에서 다시 출발합니다."
+    ? connectedPlayers < 2 ? "재대결에는 연결된 플레이어가 최소 2명 필요합니다." : "방장이 재대결을 시작하면 모든 러너가 같은 방에서 다시 출발합니다."
     : "방장이 재대결을 시작하기를 기다리거나 메인 화면으로 돌아갈 수 있습니다.";
   elements.results.classList.remove("hidden");
-  if (wasHidden) window.setTimeout(() => (isHost && room.players.length >= 2 ? elements.resultRematch : elements.resultToTitle).focus(), 0);
+  if (wasHidden) window.setTimeout(() => (isHost && connectedPlayers >= 2 ? elements.resultRematch : elements.resultToTitle).focus(), 0);
 }
 
 function respawnAtCheckpoint(message: string, now: number) {
@@ -1635,7 +1652,7 @@ function updatePlayer(dt: number, now: number) {
 }
 
 function getCamera() {
-  const playerId = multiplayerActive ? socket.id : LOCAL_GRAPPLE_ID;
+  const playerId = multiplayerActive ? getLocalNetworkPlayerId() : LOCAL_GRAPPLE_ID;
   const grappledPosition = getGrappledPosition(
     playerId,
     player.x,
@@ -1873,7 +1890,7 @@ function updateRaceBoard() {
   elements.raceBoard.classList.remove("hidden");
   const playerCheckpoint = lap >= roomConfig.lapLimit ? "FIN" : checkpointIndex < checkpoints.length ? `CP${checkpointIndex + 1}` : "START";
   const otherRunners = multiplayerActive
-    ? [...remotePlayers.values()].map((runner) => ({ id: runner.id, name: runner.name, color: runner.color, lap: runner.lap, checkpoint: runner.checkpoint, label: runner.lap >= roomConfig.lapLimit ? "FIN" : runner.checkpoint < 3 ? `CP${runner.checkpoint + 1}` : "START", me: false }))
+    ? [...remotePlayers.values()].map((runner) => ({ id: runner.id, name: runner.connected ? runner.name : `${runner.name} · 재접속`, color: runner.color, lap: runner.lap, checkpoint: runner.checkpoint, label: runner.lap >= roomConfig.lapLimit ? "FIN" : runner.checkpoint < 3 ? `CP${runner.checkpoint + 1}` : "START", me: false }))
     : testBots.map((bot) => ({ id: bot.id, name: bot.name, color: bot.color, lap: bot.lap, checkpoint: bot.checkpoint, label: bot.routeIndex < 3 ? `CP${bot.routeIndex + 1}` : "START", me: false }));
   const runners = [
     { id: 0, name: player.name, color: player.color, lap, checkpoint: checkpointIndex, label: playerCheckpoint, me: true },
@@ -1993,6 +2010,19 @@ function showToast(message: string) {
   toastTimer = window.setTimeout(() => elements.toast.classList.remove("visible"), 1900);
 }
 
+function storeNetworkSession(session: NetworkSession) {
+  activeNetworkSession = networkSessionStore.save(session);
+}
+
+function clearNetworkSession() {
+  activeNetworkSession = undefined;
+  networkSessionStore.clear();
+}
+
+function getLocalNetworkPlayerId() {
+  return activeNetworkSession?.playerId;
+}
+
 function syncNetworkHazards(hazards: NetworkHazards) {
   const now = performance.now();
   activePitIndex = hazards.activePitIndex;
@@ -2009,8 +2039,9 @@ function syncNetworkHazards(hazards: NetworkHazards) {
 
 function syncRemotePlayers(room: NetworkRoom) {
   const present = new Set<string>();
+  const playerId = getLocalNetworkPlayerId();
   for (const runner of room.players) {
-    if (runner.id === socket.id) continue;
+    if (runner.id === playerId) continue;
     present.add(runner.id);
     upsertRemotePlayer(runner);
   }
@@ -2114,6 +2145,8 @@ function upsertRemotePlayer(runner: NetworkPlayer) {
   current.health = runner.health;
   current.ammo = runner.ammo;
   current.skill = runner.skill;
+  current.connected = runner.connected;
+  current.reconnectMs = runner.reconnectMs;
   current.cloneCount = runner.cloneCount;
   current.dashCharges = runner.dashCharges;
   current.skillCooldownUntil = receivedAt + Math.max(0, runner.skillCooldownMs ?? 0);
@@ -2122,7 +2155,7 @@ function upsertRemotePlayer(runner: NetworkPlayer) {
   current.checkpoint = runner.checkpoint;
   current.targetX = runner.x;
   current.targetY = runner.y;
-  current.targetWalking = runner.walking;
+  current.targetWalking = runner.connected ? runner.walking : current.walking;
   syncRemoteHazardState(current, runner, receivedAt);
   syncRemoteTimedState(current, runner, receivedAt);
 }
@@ -2143,37 +2176,25 @@ function interpolateRemotePlayers(dt: number) {
 }
 
 function syncNetworkCountdown(room: NetworkRoom) {
+  matchCountdown.sync(room.countdownMs);
   if (room.countdownMs > 0) {
-    networkCountdownUntil = performance.now() + room.countdownMs;
-    networkStartBannerUntil = 0;
     pressedKeys.clear();
-    return;
   }
-  networkCountdownUntil = 0;
 }
 
 function showNetworkStartBanner() {
-  networkCountdownUntil = 0;
-  networkStartBannerUntil = performance.now() + 700;
+  matchCountdown.showStart();
 }
 
 function clearNetworkCountdown() {
-  networkCountdownUntil = 0;
-  networkStartBannerUntil = 0;
+  matchCountdown.clear();
   elements.matchCountdown.classList.add("hidden");
   elements.matchCountdown.classList.remove("starting");
   elements.matchCountdownValue.textContent = "";
 }
 
 function updateMatchCountdown(now: number) {
-  let value = "";
-  let starting = false;
-  if (networkStartBannerUntil > now) {
-    value = "START!";
-    starting = true;
-  } else if (networkCountdownUntil > 0 && activeNetworkRoom?.countdownMs) {
-    value = String(Math.max(1, Math.ceil((networkCountdownUntil - now) / 1000)));
-  }
+  const { value, starting } = matchCountdown.view(now, Boolean(activeNetworkRoom?.countdownMs));
   if (!value) {
     elements.matchCountdown.classList.add("hidden");
     elements.matchCountdown.classList.remove("starting");
@@ -2187,13 +2208,14 @@ function updateMatchCountdown(now: number) {
 
 function updateNetworkWaitingPanel() {
   if (!activeNetworkRoom || activeNetworkRoom.phase !== "waiting" || gameActive) return;
-  const isHost = activeNetworkRoom.hostId === socket.id;
+  const isHost = activeNetworkRoom.hostId === getLocalNetworkPlayerId();
   const countingDown = activeNetworkRoom.countdownMs > 0;
+  const connectedPlayers = countConnectedPlayers(activeNetworkRoom);
   elements.titleRoomPanel.classList.add("network-waiting");
   elements.titlePanelMarker.textContent = "ONLINE ROOM";
-  elements.titlePanelTitle.textContent = `${activeNetworkRoom.code} · ${activeNetworkRoom.players.length}/${activeNetworkRoom.config.playerCount}명`;
+  elements.titlePanelTitle.textContent = `${activeNetworkRoom.code} · ${connectedPlayers}/${activeNetworkRoom.config.playerCount}명`;
   elements.titleConfirm.textContent = countingDown ? "출발 준비!" : isHost ? "경기 시작" : "방장 시작 대기";
-  elements.titleConfirm.disabled = countingDown || !isHost || activeNetworkRoom.players.length < 2;
+  elements.titleConfirm.disabled = countingDown || !isHost || connectedPlayers < 2;
 }
 
 function applyNetworkRoom(room: NetworkRoom) {
@@ -2203,7 +2225,7 @@ function applyNetworkRoom(room: NetworkRoom) {
   syncNetworkHazards(room.hazards);
   syncRemotePlayers(room);
   syncNetworkClones(room);
-  const self = room.players.find((runner) => runner.id === socket.id);
+  const self = room.players.find((runner) => runner.id === getLocalNetworkPlayerId());
   if (self && multiplayerActive && gameActive) {
     const previousLap = lap;
     const previousCheckpoint = checkpointIndex;
@@ -2262,7 +2284,7 @@ function ensureSocketConnected() {
   });
 }
 
-function requestNetworkRoom(event: "room:create" | "room:join" | "room:start" | "room:rematch", payload?: unknown) {
+function requestNetworkRoom(event: "room:create" | "room:join" | "room:resume" | "room:start" | "room:rematch", payload?: unknown) {
   return new Promise<NetworkRoom>((resolve, reject) => {
     let settled = false;
     const timeout = window.setTimeout(() => {
@@ -2276,10 +2298,55 @@ function requestNetworkRoom(event: "room:create" | "room:join" | "room:start" | 
         reject(new Error(response?.error ?? "방 요청을 처리하지 못했습니다."));
         return;
       }
+      if (response.session) storeNetworkSession(response.session);
       resolve(response.room);
     };
     if (payload === undefined) socket.emit(event, done);
     else socket.emit(event, payload, done);
+  });
+}
+
+function restoreNetworkRoom(room: NetworkRoom) {
+  if (room.phase === "running" || room.phase === "finished") {
+    startNetworkMatch(room);
+    applyNetworkRoom(room);
+    showToast(`${room.code} 방의 경기 상태를 복구했습니다.`);
+    return;
+  }
+  multiplayerActive = false;
+  gameActive = false;
+  elements.game.classList.add("hidden");
+  elements.title.classList.remove("hidden");
+  elements.titleRoomPanel.classList.remove("hidden", "create-mode");
+  elements.titleRoomPanel.classList.add("network-waiting");
+  elements.titleStage.classList.add("room-panel-open");
+  elements.titleStage.classList.remove("create-panel-open");
+  applyNetworkRoom(room);
+  showToast(`${room.code} 대기실에 다시 연결했습니다.`);
+}
+
+function resumeNetworkSession() {
+  const session = activeNetworkSession;
+  if (!session || !socket.connected || networkResumeInFlight) return;
+  networkResumeInFlight = true;
+  const timeout = window.setTimeout(() => {
+    networkResumeInFlight = false;
+    showToast("재접속 응답이 지연되고 있습니다. 다시 시도합니다.");
+    if (socket.connected) window.setTimeout(resumeNetworkSession, 500);
+  }, 5000);
+  socket.emit("room:resume", session, (response: NetworkResponse) => {
+    window.clearTimeout(timeout);
+    networkResumeInFlight = false;
+    if (activeNetworkSession?.playerId !== session.playerId) return;
+    if (!response?.ok) {
+      const message = response?.error ?? "기존 멀티플레이 세션을 복구하지 못했습니다.";
+      clearNetworkSession();
+      returnToTitle();
+      showToast(message);
+      return;
+    }
+    if (response.session) storeNetworkSession(response.session);
+    restoreNetworkRoom(response.room);
   });
 }
 
@@ -2320,6 +2387,7 @@ function readRoomConfig(): RoomConfig | undefined {
 function startLocalGame(name: string) {
   const config = roomConfig;
   if (activeNetworkRoom) socket.emit("room:leave");
+  clearNetworkSession();
   activeNetworkRoom = undefined;
   activeNetworkRound = 0;
   multiplayerActive = false;
@@ -2394,7 +2462,7 @@ function startNetworkMatch(room: NetworkRoom) {
     applyNetworkRoom(room);
     return;
   }
-  const self = room.players.find((runner) => runner.id === socket.id);
+  const self = room.players.find((runner) => runner.id === getLocalNetworkPlayerId());
   if (!self) return;
   activeNetworkRoom = room;
   activeNetworkRound = room.round;
@@ -2562,6 +2630,7 @@ function togglePractice() {
 
 function returnToTitle() {
   if (activeNetworkRoom) socket.emit("room:leave");
+  clearNetworkSession();
   activeNetworkRoom = undefined;
   activeNetworkRound = 0;
   multiplayerActive = false;
@@ -2623,7 +2692,10 @@ function openTitleRoomPanel(mode: TitleRoomMode) {
 }
 
 function closeTitleRoomPanel() {
-  if (activeNetworkRoom && !gameActive) socket.emit("room:leave");
+  if (activeNetworkRoom && !gameActive) {
+    socket.emit("room:leave");
+    clearNetworkSession();
+  }
   activeNetworkRoom = undefined;
   if (!gameActive) activeNetworkRound = 0;
   if (!gameActive) clearNetworkCountdown();
@@ -2653,7 +2725,7 @@ async function startFromTitleRoomPanel() {
   try {
     await ensureSocketConnected();
     if (activeNetworkRoom) {
-      if (activeNetworkRoom.hostId !== socket.id) return;
+      if (activeNetworkRoom.hostId !== getLocalNetworkPlayerId()) return;
       const room = await requestNetworkRoom("room:start");
       applyNetworkRoom(room);
       return;
@@ -2693,7 +2765,7 @@ async function startFromTitleRoomPanel() {
 }
 
 async function startNetworkRematch() {
-  if (!activeNetworkRoom || activeNetworkRoom.phase !== "finished" || activeNetworkRoom.hostId !== socket.id) return;
+  if (!activeNetworkRoom || activeNetworkRoom.phase !== "finished" || activeNetworkRoom.hostId !== getLocalNetworkPlayerId()) return;
   elements.resultRematch.disabled = true;
   elements.resultStatus.textContent = "출발선을 다시 준비하고 있습니다…";
   try {
@@ -2701,7 +2773,7 @@ async function startNetworkRematch() {
     applyNetworkRoom(room);
     elements.resultStatus.textContent = "3초 뒤 재대결이 시작됩니다.";
   } catch (error) {
-    elements.resultRematch.disabled = activeNetworkRoom.players.length < 2;
+    elements.resultRematch.disabled = countConnectedPlayers(activeNetworkRoom) < 2;
     elements.resultStatus.textContent = error instanceof Error ? error.message : "재대결을 시작하지 못했습니다.";
   }
 }
@@ -2732,7 +2804,7 @@ function clearNetworkControlEffects(playerId: string) {
 function applyNetworkHazardEffect(effect: HazardEffect) {
   if (!multiplayerActive) return;
   const now = performance.now();
-  const isSelf = effect.playerId === socket.id;
+  const isSelf = effect.playerId === getLocalNetworkPlayerId();
   const remote = remotePlayers.get(effect.playerId);
   if (effect.kind === "pit") {
     clearNetworkControlEffects(effect.playerId);
@@ -2848,6 +2920,9 @@ elements.fullscreen.addEventListener("click", () => { void toggleFullscreen(); }
 elements.resultRematch.addEventListener("click", () => { void startNetworkRematch(); });
 elements.resultToTitle.addEventListener("click", returnToTitle);
 
+socket.on("connect", () => {
+  if (activeNetworkSession) resumeNetworkSession();
+});
 socket.on("room:state", (room: NetworkRoom) => applyNetworkRoom(room));
 socket.on("match:countdown", (room: NetworkRoom) => applyNetworkRoom(room));
 socket.on("match:started", (room: NetworkRoom) => {
@@ -2870,15 +2945,15 @@ socket.on("hazard:state", (hazards: NetworkHazards) => {
 });
 socket.on("hazard:effect", (effect: HazardEffect) => applyNetworkHazardEffect(effect));
 socket.on("player:state", (runner: NetworkPlayer) => {
-  if (!multiplayerActive || runner.id === socket.id) return;
+  if (!multiplayerActive || runner.id === getLocalNetworkPlayerId()) return;
   upsertRemotePlayer(runner);
 });
 socket.on("combat:shot", (shot: { sourceId: string; x: number; y: number; dx: number; dy: number }) => {
-  if (!multiplayerActive || shot.sourceId === socket.id) return;
+  if (!multiplayerActive || shot.sourceId === getLocalNetworkPlayerId()) return;
   projectiles.push({ kind: "bullet", owner: "remote", sourceId: shot.sourceId, x: shot.x, y: shot.y, velocityX: shot.dx * 430, velocityY: shot.dy * 430, until: performance.now() + 620, radius: 0 });
 });
 socket.on("combat:projectile", (projectile: { kind: "slow" | "sleep"; sourceId: string; x: number; y: number; velocityX: number; velocityY: number; lifetime: number }) => {
-  if (!multiplayerActive || projectile.sourceId === socket.id) return;
+  if (!multiplayerActive || projectile.sourceId === getLocalNetworkPlayerId()) return;
   projectiles.push({
     kind: projectile.kind,
     owner: "remote",
@@ -2897,14 +2972,15 @@ socket.on("combat:grapple", (grapple: Omit<GrappleEffect, "startedAt" | "until">
   const now = performance.now();
   if (grapple.targetId !== undefined) grappleEffects.splice(0, grappleEffects.length, ...grappleEffects.filter((effect) => effect.targetId !== grapple.targetId));
   grappleEffects.push({ ...grapple, startedAt: now, until: now + 520 });
-  if (grapple.sourceId === socket.id || grapple.targetId === socket.id) grappleLockUntil = now + 520;
+  const playerId = getLocalNetworkPlayerId();
+  if (grapple.sourceId === playerId || grapple.targetId === playerId) grappleLockUntil = now + 520;
 });
 socket.on("combat:knockback", (knockback: Omit<PushEffect, "startedAt" | "until">) => {
   if (!multiplayerActive) return;
   const now = performance.now();
   pushEffects.splice(0, pushEffects.length, ...pushEffects.filter((effect) => effect.targetId !== knockback.targetId));
   pushEffects.push({ ...knockback, startedAt: now, until: now + knockback.duration });
-  if (knockback.targetId === socket.id) {
+  if (knockback.targetId === getLocalNetworkPlayerId()) {
     player.x = knockback.endX;
     player.y = knockback.endY;
     player.knockbackX = 0;
@@ -2933,7 +3009,8 @@ socket.on("combat:effect", (effect: { kind: "bullet" | SkillId; sourceId: string
   if (effect.kind === "slow" && Number.isFinite(effect.x) && Number.isFinite(effect.y)) {
     slowImpacts.push({ x: effect.x as number, y: effect.y as number, startedAt: now, until: now + 520 });
   }
-  const hitMe = socket.id ? effect.targetIds.includes(socket.id) : false;
+  const playerId = getLocalNetworkPlayerId();
+  const hitMe = playerId ? effect.targetIds.includes(playerId) : false;
   if (hitMe && effect.kind === "sleep") networkSleepUntil = now + (effect.duration ?? 2000);
   if (hitMe && effect.kind === "slow") networkSlowUntil = now + (effect.duration ?? 3600);
   if (effect.kind === "sleep") {
@@ -2971,10 +3048,12 @@ socket.on("combat:effect", (effect: { kind: "bullet" | SkillId; sourceId: string
     }
   }
   if (effect.kind === "bullet" && hitMe) showToast(effect.defeated ? "처치당했습니다! 체크포인트에서 부활." : "총알에 맞았다!");
-  if (effect.sourceId === socket.id && effect.targetIds.length > 0) showToast(`${skillLabels[effect.kind as SkillId] ?? "총알"} 명중!`);
+  if (effect.sourceId === playerId && effect.targetIds.length > 0) showToast(`${skillLabels[effect.kind as SkillId] ?? "총알"} 명중!`);
 });
 socket.on("disconnect", () => {
-  if (multiplayerActive) showToast("서버 연결이 끊겼습니다. 로비로 돌아가 다시 연결하세요.");
+  if (!activeNetworkSession) return;
+  pressedKeys.clear();
+  showToast("연결이 끊겼습니다. 30초 동안 기존 경기로 재접속합니다.");
 });
 
 function updateAimFromPointer(event: PointerEvent) {
@@ -3033,4 +3112,8 @@ window.addEventListener("keydown", (event) => {
 window.addEventListener("keyup", (event) => pressedKeys.delete(getControlKey(event)));
 window.addEventListener("blur", () => pressedKeys.clear());
 
+if (activeNetworkSession) {
+  showToast("이전 멀티플레이 세션에 다시 연결하고 있습니다.");
+  socket.connect();
+}
 requestAnimationFrame(animate);

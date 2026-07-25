@@ -1,5 +1,13 @@
 import { createServer } from "node:http";
 import { Server } from "socket.io";
+import { loadServerConfig } from "./config.mjs";
+import { createAppRequestHandler } from "./http-handler.mjs";
+import {
+  countConnectedPlayers,
+  createPlayerIdentity,
+  createReconnectSession,
+  selectNextHost,
+} from "./player-session.mjs";
 import {
   CHECKPOINTS,
   CLONE_COOLDOWN,
@@ -11,7 +19,6 @@ import {
   GRAB_RANGE,
   JUMP_DURATION,
   JUMP_PADS,
-  MATCH_TIME_LIMIT,
   PIT_CYCLE_MIN_DELAY,
   PIT_CYCLE_RANDOM_DELAY,
   PIT_FALL_DURATION,
@@ -44,19 +51,38 @@ import {
   resetPlayerTimedStates,
 } from "../shared/player-state.mjs";
 
-const PORT = Number(process.env.PORT ?? 5175);
-const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN ?? "http://127.0.0.1:5174";
+const config = loadServerConfig();
 const TEST_ROOM_CODE = "TEST";
 const SKILLS = new Set(SKILL_IDS);
-const MATCH_TIME_LIMIT_MS = Math.max(100, Number(process.env.MATCH_TIME_LIMIT_MS) || MATCH_TIME_LIMIT);
-const MATCH_COUNTDOWN_MS = Math.max(100, Number(process.env.MATCH_COUNTDOWN_MS) || 3_000);
-
-const httpServer = createServer();
-const io = new Server(httpServer, {
-  cors: { origin: CLIENT_ORIGIN, methods: ["GET", "POST"] },
-});
-
 const rooms = new Map();
+const serverStartedAt = Date.now();
+
+function runtimeStatus() {
+  const phases = { waiting: 0, running: 0, finished: 0 };
+  let playerCount = 0;
+  let connectedPlayerCount = 0;
+  for (const room of rooms.values()) {
+    phases[room.phase] += 1;
+    playerCount += room.players.size;
+    connectedPlayerCount += countConnectedPlayers(room.players);
+  }
+  return {
+    uptimeMs: Date.now() - serverStartedAt,
+    rooms: rooms.size,
+    players: playerCount,
+    connectedPlayers: connectedPlayerCount,
+    socketConnections: io?.engine?.clientsCount ?? 0,
+    phases,
+  };
+}
+
+const httpServer = createServer(createAppRequestHandler({
+  staticDir: config.staticDir,
+  getRuntimeStatus: runtimeStatus,
+}));
+const io = new Server(httpServer, {
+  cors: { origin: config.clientOrigins, methods: ["GET", "POST"] },
+});
 
 function normalizeCode(value) {
   return String(value ?? "").trim().toUpperCase().replace(/[^A-Z0-9-]/g, "").slice(0, 12);
@@ -149,6 +175,8 @@ function publicPlayer(player, room) {
     airStartY: player.airStartY,
     airEndX: player.airEndX,
     airEndY: player.airEndY,
+    connected: player.connected,
+    reconnectMs: player.connected ? 0 : Math.max(0, player.reconnectDeadline - now),
   };
 }
 
@@ -184,28 +212,71 @@ function broadcastRoom(room) {
   io.to(room.code).emit("room:state", snapshot(room));
 }
 
+function bindPlayerSocket(room, player, socket) {
+  const previousSocketId = player.socketId;
+  player.socketId = socket.id;
+  player.connected = true;
+  player.reconnectDeadline = 0;
+  player.lastUpdateAt = Date.now();
+  socket.join(room.code);
+  socket.data.roomCode = room.code;
+  socket.data.playerId = player.id;
+  if (previousSocketId && previousSocketId !== socket.id) {
+    io.sockets.sockets.get(previousSocketId)?.disconnect(true);
+  }
+}
+
+function removePlayer(room, playerId) {
+  const player = room.players.get(playerId);
+  if (!player) return false;
+  room.players.delete(playerId);
+  room.clones = room.clones.filter((clone) => clone.ownerId !== playerId);
+  room.projectiles = room.projectiles.filter((projectile) => projectile.sourceId !== playerId);
+  if (room.countdownEndsAt > 0 && countConnectedPlayers(room.players) < 2) room.countdownEndsAt = 0;
+  if (room.hostId === playerId) room.hostId = selectNextHost(room.players);
+  if (room.players.size === 0) rooms.delete(room.code);
+  return true;
+}
+
 function leaveCurrentRoom(socket) {
   const code = socket.data.roomCode;
-  if (!code) return;
+  const playerId = socket.data.playerId;
+  if (!code || !playerId) return;
   const room = rooms.get(code);
   socket.leave(code);
   socket.data.roomCode = undefined;
+  socket.data.playerId = undefined;
   if (!room) return;
-  room.players.delete(socket.id);
-  if (room.players.size === 0) {
-    rooms.delete(code);
-    return;
-  }
-  if (room.countdownEndsAt > 0 && room.players.size < 2) room.countdownEndsAt = 0;
-  if (room.hostId === socket.id) room.hostId = room.players.keys().next().value;
+  const player = room.players.get(playerId);
+  if (!player || player.socketId !== socket.id) return;
+  removePlayer(room, playerId);
+  if (rooms.has(code)) broadcastRoom(room);
+}
+
+function disconnectCurrentRoom(socket, now = Date.now()) {
+  const code = socket.data.roomCode;
+  const playerId = socket.data.playerId;
+  socket.data.roomCode = undefined;
+  socket.data.playerId = undefined;
+  if (!code || !playerId) return;
+  const room = rooms.get(code);
+  const player = room?.players.get(playerId);
+  if (!room || !player || player.socketId !== socket.id) return;
+  player.socketId = undefined;
+  player.connected = false;
+  player.reconnectDeadline = now + config.reconnectGraceMs;
   broadcastRoom(room);
 }
 
 function addPlayer(room, socket, name) {
   const index = room.players.size;
   const spawn = SPAWNS[index] ?? SPAWNS[0];
-  room.players.set(socket.id, {
-    id: socket.id,
+  const identity = createPlayerIdentity();
+  const player = {
+    ...identity,
+    socketId: undefined,
+    connected: false,
+    reconnectDeadline: 0,
     name: sanitizeName(name),
     color: COLORS[index % COLORS.length],
     joinOrder: room.nextJoinOrder++,
@@ -238,9 +309,10 @@ function addPlayer(room, socket, name) {
     airEndY: spawn.y,
     jumpPadCooldownUntil: 0,
     spinnerImmuneUntil: 0,
-  });
-  socket.join(room.code);
-  socket.data.roomCode = room.code;
+  };
+  room.players.set(player.id, player);
+  bindPlayerSocket(room, player, socket);
+  return player;
 }
 
 function resetPlayers(room, now = Date.now()) {
@@ -318,7 +390,7 @@ function updateSkillProjectiles(room, now) {
     projectile.lastUpdateAt = now;
     let hitTarget;
     for (const target of room.players.values()) {
-      if (target.id === projectile.sourceId || !canPlayerReceiveHit(target, now)) continue;
+      if (!target.connected || target.id === projectile.sourceId || !canPlayerReceiveHit(target, now)) continue;
       if (pointSegmentDistance(target.x, target.y, startX, startY, projectile.x, projectile.y) > 12) continue;
       hitTarget = target;
       break;
@@ -336,7 +408,7 @@ function updateSkillProjectiles(room, now) {
     }
     if (projectile.kind === "slow") {
       for (const target of room.players.values()) {
-        if (target.id === projectile.sourceId || !canPlayerReceiveHit(target, now)) continue;
+        if (!target.connected || target.id === projectile.sourceId || !canPlayerReceiveHit(target, now)) continue;
         if (Math.hypot(target.x - projectile.x, target.y - projectile.y) > 72) continue;
         target.slowUntil = now + 3600;
         targetIds.push(target.id);
@@ -360,7 +432,7 @@ function findTarget(room, attacker, aim, maxDistance, minimumDot = 0.5, now = Da
   let selected;
   let closest = Number.POSITIVE_INFINITY;
   for (const target of room.players.values()) {
-    if (target.id === attacker.id) continue;
+    if (!target.connected || target.id === attacker.id) continue;
     if (!canPlayerReceiveHit(target, now)) continue;
     const dx = target.x - attacker.x;
     const dy = target.y - attacker.y;
@@ -379,7 +451,7 @@ function findTargetOnAimLine(room, attacker, aim, maxDistance = GRAB_RANGE, hitR
   let selected;
   let closestForwardDistance = Number.POSITIVE_INFINITY;
   for (const target of room.players.values()) {
-    if (target.id === attacker.id) continue;
+    if (!target.connected || target.id === attacker.id) continue;
     if (!canPlayerBeDisplaced(target, now)) continue;
     const dx = target.x - attacker.x;
     const dy = target.y - attacker.y;
@@ -460,7 +532,7 @@ function startRoomMatch(room, now = Date.now()) {
 }
 
 function startRoomCountdown(room, now = Date.now()) {
-  room.countdownEndsAt = now + MATCH_COUNTDOWN_MS;
+  room.countdownEndsAt = now + config.matchCountdownMs;
 }
 
 function blockedByClone(room, x, y) {
@@ -671,7 +743,7 @@ function findNearestPitIndex(room) {
     const centerX = pit.x + pit.width / 2;
     const centerY = pit.y + pit.height / 2;
     for (const player of room.players.values()) {
-      if (player.fallingUntil > 0) continue;
+      if (!player.connected || player.fallingUntil > 0) continue;
       const distance = Math.hypot(player.x - centerX, player.y - centerY);
       if (distance >= selectedDistance) continue;
       selectedIndex = index;
@@ -744,7 +816,7 @@ io.on("connection", (socket) => {
     }
     const room = {
       code,
-      hostId: socket.id,
+      hostId: undefined,
       config: sanitizeConfig(payload?.config),
       players: new Map(),
       nextJoinOrder: 0,
@@ -758,9 +830,10 @@ io.on("connection", (socket) => {
       hazards: createHazardState(),
     };
     rooms.set(code, room);
-    addPlayer(room, socket, payload?.name);
+    const player = addPlayer(room, socket, payload?.name);
+    room.hostId = player.id;
     const roomSnapshot = snapshot(room);
-    ack(callback, { ok: true, room: roomSnapshot });
+    ack(callback, { ok: true, room: roomSnapshot, session: createReconnectSession(room.code, player) });
     broadcastRoom(room);
   });
 
@@ -771,7 +844,7 @@ io.on("connection", (socket) => {
     if (code === TEST_ROOM_CODE && !room) {
       room = {
         code: TEST_ROOM_CODE,
-        hostId: socket.id,
+        hostId: undefined,
         config: { lapLimit: 5, playerCount: 6, enabledSkills: [...SKILLS] },
         players: new Map(),
         nextJoinOrder: 0,
@@ -802,19 +875,43 @@ io.on("connection", (socket) => {
       ack(callback, { ok: false, error: "방 인원이 가득 찼습니다." });
       return;
     }
-    addPlayer(room, socket, payload?.name);
+    const player = addPlayer(room, socket, payload?.name);
+    if (!room.hostId) room.hostId = player.id;
     const roomSnapshot = snapshot(room);
-    ack(callback, { ok: true, room: roomSnapshot });
+    ack(callback, { ok: true, room: roomSnapshot, session: createReconnectSession(room.code, player) });
+    broadcastRoom(room);
+  });
+
+  socket.on("room:resume", (payload, callback) => {
+    const code = normalizeCode(payload?.roomCode);
+    const playerId = String(payload?.playerId ?? "");
+    const reconnectToken = String(payload?.reconnectToken ?? "");
+    const room = rooms.get(code);
+    const player = room?.players.get(playerId);
+    if (!room || !player || !reconnectToken || player.reconnectToken !== reconnectToken) {
+      ack(callback, { ok: false, error: "재접속 세션이 만료되었거나 올바르지 않습니다." });
+      return;
+    }
+    if (!player.connected && player.reconnectDeadline > 0 && player.reconnectDeadline <= Date.now()) {
+      removePlayer(room, player.id);
+      if (rooms.has(code)) broadcastRoom(room);
+      ack(callback, { ok: false, error: "재접속 유예 시간이 지나 세션이 만료되었습니다." });
+      return;
+    }
+    if (socket.data.roomCode !== code || socket.data.playerId !== playerId) leaveCurrentRoom(socket);
+    bindPlayerSocket(room, player, socket);
+    const roomSnapshot = snapshot(room);
+    ack(callback, { ok: true, room: roomSnapshot, session: createReconnectSession(room.code, player) });
     broadcastRoom(room);
   });
 
   socket.on("room:start", (callback) => {
     const room = rooms.get(socket.data.roomCode);
-    if (!room || room.hostId !== socket.id) {
+    if (!room || room.hostId !== socket.data.playerId) {
       ack(callback, { ok: false, error: "방장만 경기를 시작할 수 있습니다." });
       return;
     }
-    if (room.players.size < 2) {
+    if (countConnectedPlayers(room.players) < 2) {
       ack(callback, { ok: false, error: "최소 2명이 참가해야 시작할 수 있습니다." });
       return;
     }
@@ -835,7 +932,7 @@ io.on("connection", (socket) => {
 
   socket.on("room:rematch", (callback) => {
     const room = rooms.get(socket.data.roomCode);
-    if (!room || room.hostId !== socket.id) {
+    if (!room || room.hostId !== socket.data.playerId) {
       ack(callback, { ok: false, error: "방장만 재대결을 시작할 수 있습니다." });
       return;
     }
@@ -843,7 +940,7 @@ io.on("connection", (socket) => {
       ack(callback, { ok: false, error: "경기가 끝난 뒤에만 재대결할 수 있습니다." });
       return;
     }
-    if (room.players.size < 2) {
+    if (countConnectedPlayers(room.players) < 2) {
       ack(callback, { ok: false, error: "최소 2명이 참가해야 재대결할 수 있습니다." });
       return;
     }
@@ -860,7 +957,7 @@ io.on("connection", (socket) => {
 
   socket.on("player:state", (payload) => {
     const room = rooms.get(socket.data.roomCode);
-    const player = room?.players.get(socket.id);
+    const player = room?.players.get(socket.data.playerId);
     if (!room || room.phase !== "running" || !player) return;
     const x = Number(payload?.x);
     const y = Number(payload?.y);
@@ -887,7 +984,7 @@ io.on("connection", (socket) => {
 
   socket.on("combat:shoot", (payload) => {
     const room = rooms.get(socket.data.roomCode);
-    const attacker = room?.players.get(socket.id);
+    const attacker = room?.players.get(socket.data.playerId);
     const now = Date.now();
     if (!room || room.phase !== "running" || !attacker || !canPlayerAct(attacker, now) || attacker.nextShotAt > now || attacker.ammo <= 0) return;
     const aim = normalisedAim(payload);
@@ -902,7 +999,7 @@ io.on("connection", (socket) => {
 
   socket.on("combat:skill", (payload) => {
     const room = rooms.get(socket.data.roomCode);
-    const attacker = room?.players.get(socket.id);
+    const attacker = room?.players.get(socket.data.playerId);
     const now = Date.now();
     if (!room || room.phase !== "running" || !attacker || !canPlayerAct(attacker, now) || attacker.nextSkillAt > now) return;
     const skill = attacker.skill;
@@ -913,7 +1010,7 @@ io.on("connection", (socket) => {
     const targetIds = [];
     if (skill === "push") {
       for (const target of room.players.values()) {
-        if (target.id === attacker.id) continue;
+        if (!target.connected || target.id === attacker.id) continue;
         if (!canPlayerBeDisplaced(target, now)) continue;
         const dx = target.x - attacker.x;
         const dy = target.y - attacker.y;
@@ -999,7 +1096,7 @@ io.on("connection", (socket) => {
         };
         room.clones.push(clone);
         for (const target of room.players.values()) {
-          if (target.id === attacker.id) continue;
+          if (!target.connected || target.id === attacker.id) continue;
           if (!canPlayerBeDisplaced(target, now)) continue;
           nudgePlayerFromNewClone(room, target, clone, aim.x, aim.y);
         }
@@ -1023,14 +1120,14 @@ io.on("connection", (socket) => {
   });
 
   socket.on("room:leave", () => leaveCurrentRoom(socket));
-  socket.on("disconnect", () => leaveCurrentRoom(socket));
+  socket.on("disconnect", () => disconnectCurrentRoom(socket));
 });
 
 const hazardTimer = setInterval(() => {
   const now = Date.now();
   for (const room of rooms.values()) {
     if (room.countdownEndsAt > 0) {
-      if (room.players.size < 2) {
+      if (countConnectedPlayers(room.players) < 2) {
         room.countdownEndsAt = 0;
         broadcastRoom(room);
         continue;
@@ -1043,7 +1140,7 @@ const hazardTimer = setInterval(() => {
       continue;
     }
     if (room.phase !== "running") continue;
-    if (now - room.matchStartedAt >= MATCH_TIME_LIMIT_MS) {
+    if (now - room.matchStartedAt >= config.matchTimeLimitMs) {
       finishRoom(room, "time-limit", now);
       broadcastRoom(room);
       continue;
@@ -1067,6 +1164,55 @@ const hazardTimer = setInterval(() => {
 }, 25);
 hazardTimer.unref();
 
-httpServer.listen(PORT, "0.0.0.0", () => {
-  console.log(`Panic Marathon multiplayer server listening on :${PORT}`);
+const reconnectTimer = setInterval(() => {
+  const now = Date.now();
+  for (const [code, room] of rooms) {
+    let changed = false;
+    for (const player of [...room.players.values()]) {
+      if (player.connected || player.reconnectDeadline <= 0 || player.reconnectDeadline > now) continue;
+      changed = removePlayer(room, player.id) || changed;
+    }
+    if (changed && rooms.has(code)) broadcastRoom(room);
+  }
+}, 250);
+reconnectTimer.unref();
+
+httpServer.listen(config.port, config.host, () => {
+  console.log(`Panic Marathon multiplayer server listening on http://${config.host}:${config.port}`);
 });
+
+let shuttingDown = false;
+
+function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`Received ${signal}; closing multiplayer server`);
+  clearInterval(hazardTimer);
+  clearInterval(reconnectTimer);
+  const forceExitTimer = setTimeout(() => {
+    console.error("Graceful shutdown timed out");
+    process.exit(1);
+  }, 5_000);
+  forceExitTimer.unref();
+
+  const finish = () => {
+    clearTimeout(forceExitTimer);
+    process.exitCode = 0;
+    if (process.connected) process.disconnect();
+  };
+  io.close(() => {
+    if (!httpServer.listening) {
+      finish();
+      return;
+    }
+    httpServer.close(finish);
+  });
+}
+
+process.once("SIGINT", () => shutdown("SIGINT"));
+process.once("SIGTERM", () => shutdown("SIGTERM"));
+if (typeof process.send === "function") {
+  process.once("message", (message) => {
+    if (message === "shutdown" || message?.type === "shutdown") shutdown("IPC shutdown request");
+  });
+}
