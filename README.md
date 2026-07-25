@@ -23,6 +23,7 @@ npm run dev
 - 방 생성·참가·방장 시작·퇴장·재대결과 자동 방장 위임
 - 경기 시작과 재대결 전에 모든 참가자에게 동기화되는 `3 → 2 → 1 → START` 카운트다운
 - 2~6인, 1~999랩, 최소 3개 이상의 활성 스킬 설정
+- 말썽 운동장 단일 트랙과 서버 권한 구덩이·점프대·회전 장애물
 - 체크포인트 3개와 시작선을 순서대로 통과하는 서버 판정 레이스
 - 서버 판정 기본 총, 라이프·탄창, 최초 완주자와 전체 최종 순위 결정
 - 밀치기·돌진·질주·그랩·분신·슬로우탄·수면총
@@ -32,6 +33,7 @@ npm run dev
 - 경기 결과 화면, 1시간 제한 시점의 진행도 순위, 같은 방 방장 재대결
 - 고정 플레이어 ID와 재접속 토큰, 연결 종료 후 30초 경기 상태 보존과 방장 권한 복구
 - 단일 Node 프로세스의 정적 빌드·Socket.IO 제공, 상태 확인과 정상 종료
+- Web Audio 기반 효과음·64스텝 연속 칩튠 BGM과 게임 내 음소거
 
 상세 규칙과 남은 작업은 [plan.md](./plan.md)를 기준으로 관리합니다.
 
@@ -54,10 +56,17 @@ src/main.ts                 Canvas 렌더링, 입력, 화면·네트워크 연�
 src/game/types.ts           클라이언트 게임·네트워크 타입
 src/game/network-session.ts 재접속 세션 저장과 배포 서버 주소 선택
 src/game/match-countdown.ts 서버 기준 경기 시작 카운트다운
+src/game/input-controller.ts 키보드·포인터 입력 연결
+src/game/audio.ts           효과음·칩튠 BGM
+src/game/world-renderer.ts  맵 테마·배경 픽셀 렌더링
+src/game/pixel-renderer.ts  러너 공통 픽셀 렌더링
+src/game/map-content.ts     맵별 오브젝트·NPC 배치
 server/index.mjs            Socket.IO 방, 전투, 레이스·함정 판정
 server/config.mjs           실행 환경과 배포 설정
 server/http-handler.mjs     정적 SPA, health/readiness 응답
 server/player-session.mjs   고정 ID·재접속 토큰·방장 선택
+server/room-state.mjs       방 설정 검증과 초기 상태 생성
+shared/map-catalog.mjs      운동장 맵의 공통 테마·서버 장애물 규칙
 shared/game-rules.mjs       클라이언트·서버 공통 규칙과 맵 데이터
 shared/geometry.mjs         공통 트랙·충돌 계산
 shared/movement-validation.mjs  서버 이동 검증
@@ -97,4 +106,7 @@ npm run check:server
 전체 검증은 `npm run verify`로 한 번에 실행할 수 있습니다.
 
 - `npm run test:load`: 2·4·6인 방을 동시에 실행하는 지속 위치 패킷 부하 검증
+- `npm run test:soak`: 2·4·6인 방을 30분간 동시 구동하며 메모리·응답 지연·재접속을 측정
 - `npm run test:deployment`: 정적 SPA·상태 확인·Socket.IO·정상 종료 검증
+
+장시간 시간을 조절하려면 `SOAK_DURATION_MS`를 지정합니다. 예를 들어 PowerShell에서 1분 검증은 `$env:SOAK_DURATION_MS="60000"; npm run test:soak`입니다.
