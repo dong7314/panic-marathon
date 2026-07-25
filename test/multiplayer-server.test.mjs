@@ -106,7 +106,7 @@ test("multiplayer rooms preserve names and reject movement into the infield", { 
   const port = await reservePort();
   const server = spawn(process.execPath, ["server/index.mjs"], {
     cwd: process.cwd(),
-    env: { ...process.env, PORT: String(port), CLIENT_ORIGIN: "http://127.0.0.1:5174" },
+    env: { ...process.env, PORT: String(port), CLIENT_ORIGIN: "http://127.0.0.1:5174", MATCH_COUNTDOWN_MS: "120" },
     stdio: ["ignore", "pipe", "pipe"],
   });
   await waitForServer(server);
@@ -127,9 +127,26 @@ test("multiplayer rooms preserve names and reject movement into the infield", { 
     config: { lapLimit: 2, playerCount: 2, enabledSkills: ["push", "dash", "run"] },
   });
   await request(guest, "room:join", { code, name: "Beta" });
-  const started = await request(host, "room:start");
+  const startEvent = onceMatching(host, "match:started", (room) => room.code === code);
+  const countdown = await request(host, "room:start");
+  assert.equal(countdown.phase, "waiting");
+  assert.equal(countdown.countdownMs > 0 && countdown.countdownMs <= 120, true);
+
+  let movementReceivedDuringCountdown = false;
+  const countdownMovementListener = (player) => {
+    if (player.id === host.id) movementReceivedDuringCountdown = true;
+  };
+  guest.on("player:state", countdownMovementListener);
+  host.emit("player:state", { x: 144, y: 856, direction: "right", walking: 1 });
+  await delay(40);
+  guest.off("player:state", countdownMovementListener);
+  assert.equal(movementReceivedDuringCountdown, false);
+
+  const started = await startEvent;
 
   assert.deepEqual(started.players.map((player) => player.name), ["Alpha", "Beta"]);
+  assert.equal(started.phase, "running");
+  assert.equal(started.countdownMs, 0);
   assert.equal(started.hazards.spinnerElapsedMs >= 0, true);
 
   for (const x of [144, 160, 176, 192, 208, 224, 240]) {
@@ -165,6 +182,7 @@ test("a finished room publishes full standings and lets only the host start a re
       PORT: String(port),
       CLIENT_ORIGIN: "http://127.0.0.1:5174",
       MATCH_TIME_LIMIT_MS: "300",
+      MATCH_COUNTDOWN_MS: "120",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -188,8 +206,12 @@ test("a finished room publishes full standings and lets only the host start a re
   await request(guest, "room:join", { code, name: "Beta" });
   const hostFinished = onceMatching(host, "match:finished", (room) => room.code === code);
   const guestFinished = onceMatching(guest, "match:finished", (room) => room.code === code);
-  const started = await request(host, "room:start");
+  const hostStarted = onceMatching(host, "match:started", (room) => room.code === code);
+  const countdown = await request(host, "room:start");
+  const started = await hostStarted;
 
+  assert.equal(countdown.phase, "waiting");
+  assert.equal(countdown.countdownMs > 0, true);
   assert.equal(started.phase, "running");
   assert.equal(started.round, 1);
   const [hostResult, guestResult] = await Promise.all([hostFinished, guestFinished]);
@@ -204,21 +226,23 @@ test("a finished room publishes full standings and lets only the host start a re
 
   await assert.rejects(request(guest, "room:rematch"), /방장만 재대결/);
   const guestRestarted = onceMatching(guest, "match:started", (room) => room.code === code && room.round === 2);
-  const restarted = await request(host, "room:rematch");
-  const guestRestart = await guestRestarted;
+  const rematchCountdown = await request(host, "room:rematch");
+  const restarted = await guestRestarted;
+  assert.equal(rematchCountdown.phase, "finished");
+  assert.equal(rematchCountdown.countdownMs > 0, true);
   assert.equal(restarted.phase, "running");
   assert.equal(restarted.round, 2);
   assert.equal(restarted.result, null);
-  assert.equal(guestRestart.players.every((player) => player.lap === 0 && player.checkpoint === 0), true);
-  assert.equal(guestRestart.players.every((player) => player.actionState === "normal"), true);
-  assert.equal(guestRestart.players.every((player) => player.sleepMs === 0 && player.slowMs === 0 && player.runMs === 0), true);
+  assert.equal(restarted.players.every((player) => player.lap === 0 && player.checkpoint === 0), true);
+  assert.equal(restarted.players.every((player) => player.actionState === "normal"), true);
+  assert.equal(restarted.players.every((player) => player.sleepMs === 0 && player.slowMs === 0 && player.runMs === 0), true);
 });
 
 test("2, 4, and 6 player rooms start with consistent state and propagate movement", { timeout: 20_000 }, async (t) => {
   const port = await reservePort();
   const server = spawn(process.execPath, ["server/index.mjs"], {
     cwd: process.cwd(),
-    env: { ...process.env, PORT: String(port), CLIENT_ORIGIN: "http://127.0.0.1:5174" },
+    env: { ...process.env, PORT: String(port), CLIENT_ORIGIN: "http://127.0.0.1:5174", MATCH_COUNTDOWN_MS: "120" },
     stdio: ["ignore", "pipe", "pipe"],
   });
   await waitForServer(server);
@@ -244,8 +268,10 @@ test("2, 4, and 6 player rooms start with consistent state and propagate movemen
     }
 
     const startEvents = clients.map((client) => onceMatching(client, "match:started", (room) => room.code === code));
-    const started = await request(host, "room:start");
+    const countdown = await request(host, "room:start");
     const receivedStarts = await Promise.all(startEvents);
+    const started = receivedStarts[0];
+    assert.equal(countdown.countdownMs > 0, true);
     assert.equal(started.players.length, playerCount);
     assert.equal(receivedStarts.every((room) => room.round === 1 && room.phase === "running"), true);
     assert.equal(started.players.every((player) => player.actionState === "normal"), true);
@@ -286,7 +312,7 @@ test("jump pads use a server-owned endpoint and lock airborne movement", { timeo
   const port = await reservePort();
   const server = spawn(process.execPath, ["server/index.mjs"], {
     cwd: process.cwd(),
-    env: { ...process.env, PORT: String(port), CLIENT_ORIGIN: "http://127.0.0.1:5174" },
+    env: { ...process.env, PORT: String(port), CLIENT_ORIGIN: "http://127.0.0.1:5174", MATCH_COUNTDOWN_MS: "120" },
     stdio: ["ignore", "pipe", "pipe"],
   });
   await waitForServer(server);
@@ -306,7 +332,10 @@ test("jump pads use a server-owned endpoint and lock airborne movement", { timeo
     config: { lapLimit: 2, playerCount: 2, enabledSkills: ["push", "dash", "run"] },
   });
   await request(guest, "room:join", { code, name: "Observer" });
-  const started = await request(host, "room:start");
+  const startEvent = onceMatching(host, "match:started", (room) => room.code === code);
+  const countdown = await request(host, "room:start");
+  assert.equal(countdown.countdownMs > 0, true);
+  const started = await startEvent;
   const hostStart = started.players.find((player) => player.id === host.id);
   assert.ok(hostStart);
 
