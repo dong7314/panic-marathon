@@ -1,4 +1,5 @@
 import type { SkillId } from "../../shared/game-rules.mjs";
+import type { MapId } from "../../shared/map-catalog.mjs";
 import type { PlayerActionState } from "../../shared/player-state.mjs";
 
 export type Direction = "down" | "up" | "left" | "right";
@@ -38,13 +39,13 @@ export type Player = {
 };
 
 export type Spinner = { x: number; y: number; radius: number; angle: number; speed: number };
-export type Pit = { x: number; y: number; width: number; height: number; active: boolean; warning?: boolean };
+export type Pit = { x: number; y: number; width: number; height: number; active: boolean };
 export type AimState = { screenX: number; screenY: number; worldX: number; worldY: number; visible: boolean; pulseUntil: number; pulseX: number; pulseY: number };
 export type GameMode = "track" | "practice";
 export type TestBot = { id: number; x: number; y: number; direction: Direction; walking: number; color: string; name: string; skill: SkillId; moveX: number; moveY: number; nextTurnAt: number; knockbackX: number; knockbackY: number; slowUntil: number; sleepUntil: number; health: number; lap: number; checkpoint: number; routeIndex: number; shotReadyAt: number };
 export type Clone = { x: number; y: number; direction: Direction; until: number; ownerId?: string };
 export type Projectile = { kind: "slow" | "sleep" | "bullet"; owner: "player" | "bot" | "remote"; sourceId?: string | number; x: number; y: number; velocityX: number; velocityY: number; until: number; radius: number; visualOnly?: boolean };
-export type RoomConfig = { lapLimit: number; playerCount: number; enabledSkills: SkillId[] };
+export type RoomConfig = { lapLimit: number; playerCount: number; mapId: MapId; enabledSkills: SkillId[] };
 
 export type NetworkPlayer = {
   id: string;
