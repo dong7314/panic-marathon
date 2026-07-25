@@ -72,6 +72,8 @@ test("production server serves the SPA, reports health, and shuts down gracefull
   assert.equal(health.players, 1);
   assert.equal(health.connectedPlayers, 1);
   assert.equal(health.socketConnections, 1);
+  assert.ok(health.memory.rssMb > 0);
+  assert.ok(health.memory.heapUsedMb > 0);
 
   client.disconnect();
   client = undefined;

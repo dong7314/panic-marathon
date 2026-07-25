@@ -11,9 +11,10 @@
     "multiplayer": "npm run dev",
     "build": "tsc -b && vite build",
     "check": "tsc -b --pretty false",
-    "check:server": "node --check server/index.mjs && node --check server/config.mjs && node --check server/http-handler.mjs && node --check server/player-session.mjs",
+    "check:server": "node --check server/index.mjs && node --check server/config.mjs && node --check server/http-handler.mjs && node --check server/player-session.mjs && node --check server/room-state.mjs && node --check shared/game-rules.mjs && node --check shared/map-catalog.mjs",
     "test": "node --test",
     "test:load": "node --test test/multiplayer-load.test.mjs",
+    "test:soak": "node scripts/soak-multiplayer.mjs",
     "test:deployment": "node --test test/deployment-server.test.mjs",
     "verify": "npm run check && npm test && npm run build && npm run check:server"
   },

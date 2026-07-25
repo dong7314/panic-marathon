@@ -19,7 +19,11 @@ test("2, 4, and 6 player matches remain responsive under sustained state traffic
   await waitForServer(server);
 
   const url = `http://127.0.0.1:${port}`;
-  const roomSizes = [2, 4, 6];
+  const roomSpecs = [
+    { playerCount: 2, mapId: "schoolyard" },
+    { playerCount: 4, mapId: "schoolyard" },
+    { playerCount: 6, mapId: "schoolyard" },
+  ];
   const roomGroups = [];
   const allClients = [];
   t.after(() => {
@@ -27,7 +31,7 @@ test("2, 4, and 6 player matches remain responsive under sustained state traffic
     if (!server.killed) server.kill();
   });
 
-  for (const playerCount of roomSizes) {
+  for (const { playerCount, mapId } of roomSpecs) {
     const clients = await Promise.all(
       Array.from({ length: playerCount }, () => connectClient(url)),
     );
@@ -39,6 +43,7 @@ test("2, 4, and 6 player matches remain responsive under sustained state traffic
       config: {
         lapLimit: 99,
         playerCount,
+        mapId,
         enabledSkills: ["push", "dash", "run"],
       },
     });
@@ -48,7 +53,7 @@ test("2, 4, and 6 player matches remain responsive under sustained state traffic
         name: `Load-${playerCount}-${index + 1}`,
       });
     }
-    roomGroups.push({ code, clients, playerCount });
+    roomGroups.push({ code, clients, playerCount, mapId });
   }
 
   await Promise.all(roomGroups.map(async ({ code, clients }) => {
@@ -89,10 +94,11 @@ test("2, 4, and 6 player matches remain responsive under sustained state traffic
   assert.equal(allClients.length, 12);
   assert.ok(observedStatePackets >= 2_000, `expected at least 2000 relayed state packets, received ${observedStatePackets}`);
 
-  for (const { clients, code, playerCount } of roomGroups) {
+  for (const { clients, code, playerCount, mapId } of roomGroups) {
     const room = await request(clients[0], "room:resume", clients[0].session);
     assert.equal(room.code, code);
     assert.equal(room.phase, "running");
+    assert.equal(room.config.mapId, mapId);
     assert.equal(room.players.length, playerCount);
     assert.equal(room.players.filter((player) => player.connected).length, playerCount);
   }
