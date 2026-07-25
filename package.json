@@ -5,12 +5,17 @@
   "scripts": {
     "vite": "vite --host 127.0.0.1 --port 5174 --strictPort",
     "server": "node --watch server/index.mjs",
+    "start": "node server/index.mjs",
+    "serve": "npm run build && npm start",
     "dev": "node scripts/dev.mjs",
     "multiplayer": "npm run dev",
     "build": "tsc -b && vite build",
     "check": "tsc -b --pretty false",
+    "check:server": "node --check server/index.mjs && node --check server/config.mjs && node --check server/http-handler.mjs && node --check server/player-session.mjs",
     "test": "node --test",
-    "verify": "npm run check && npm test && npm run build && node --check server/index.mjs"
+    "test:load": "node --test test/multiplayer-load.test.mjs",
+    "test:deployment": "node --test test/deployment-server.test.mjs",
+    "verify": "npm run check && npm test && npm run build && npm run check:server"
   },
   "dependencies": {
     "socket.io": "^4.8.3",

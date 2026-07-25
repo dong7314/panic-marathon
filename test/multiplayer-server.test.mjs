@@ -62,7 +62,13 @@ function request(socket, event, payload) {
   return new Promise((resolve, reject) => {
     const callback = (response) => {
       if (!response?.ok) reject(new Error(response?.error ?? `${event} failed`));
-      else resolve(response.room);
+      else {
+        if (response.session) {
+          socket.session = response.session;
+          socket.playerId = response.session.playerId;
+        }
+        resolve(response.room);
+      }
     };
     if (payload === undefined) socket.emit(event, callback);
     else socket.emit(event, payload, callback);
@@ -134,7 +140,7 @@ test("multiplayer rooms preserve names and reject movement into the infield", { 
 
   let movementReceivedDuringCountdown = false;
   const countdownMovementListener = (player) => {
-    if (player.id === host.id) movementReceivedDuringCountdown = true;
+    if (player.id === host.playerId) movementReceivedDuringCountdown = true;
   };
   guest.on("player:state", countdownMovementListener);
   host.emit("player:state", { x: 144, y: 856, direction: "right", walking: 1 });
@@ -151,14 +157,14 @@ test("multiplayer rooms preserve names and reject movement into the infield", { 
 
   for (const x of [144, 160, 176, 192, 208, 224, 240]) {
     await delay(70);
-    const received = onceMatching(guest, "player:state", (player) => player.id === host.id && player.x === x);
+    const received = onceMatching(guest, "player:state", (player) => player.id === host.playerId && player.x === x);
     host.emit("player:state", { x, y: 856, direction: "right", walking: 1 });
     await received;
   }
 
   for (const y of [840, 824, 808, 792]) {
     await delay(70);
-    const received = onceMatching(guest, "player:state", (player) => player.id === host.id && player.y === y);
+    const received = onceMatching(guest, "player:state", (player) => player.id === host.playerId && player.y === y);
     host.emit("player:state", { x: 240, y, direction: "up", walking: 1 });
     await received;
   }
@@ -169,7 +175,7 @@ test("multiplayer rooms preserve names and reject movement into the infield", { 
   const roomState = onceMatching(host, "room:state", (room) => room.code === code);
   host.emit("combat:shoot", { dx: 1, dy: 0 });
   const snapshot = await roomState;
-  const hostState = snapshot.players.find((player) => player.id === host.id);
+  const hostState = snapshot.players.find((player) => player.id === host.playerId);
   assert.deepEqual({ x: hostState?.x, y: hostState?.y }, { x: 240, y: 792 });
 });
 
@@ -277,11 +283,11 @@ test("2, 4, and 6 player rooms start with consistent state and propagate movemen
     assert.equal(started.players.every((player) => player.actionState === "normal"), true);
 
     const movements = clients.map((client, index) => {
-      const initial = started.players.find((player) => player.id === client.id);
+      const initial = started.players.find((player) => player.id === client.playerId);
       assert.ok(initial);
       const x = initial.x + 8;
       const observer = clients[(index + 1) % clients.length];
-      const received = onceMatching(observer, "player:state", (player) => player.id === client.id && player.x === x);
+      const received = onceMatching(observer, "player:state", (player) => player.id === client.playerId && player.x === x);
       client.emit("player:state", { x, y: initial.y, direction: "right", walking: 1 });
       return received;
     });
@@ -290,7 +296,7 @@ test("2, 4, and 6 player rooms start with consistent state and propagate movemen
     for (let tick = 2; tick <= 12; tick += 1) {
       await delay(65);
       for (const client of clients) {
-        const initial = started.players.find((player) => player.id === client.id);
+        const initial = started.players.find((player) => player.id === client.playerId);
         client.emit("player:state", { x: initial.x + tick * 8, y: initial.y, direction: "right", walking: tick });
       }
     }
@@ -336,18 +342,18 @@ test("jump pads use a server-owned endpoint and lock airborne movement", { timeo
   const countdown = await request(host, "room:start");
   assert.equal(countdown.countdownMs > 0, true);
   const started = await startEvent;
-  const hostStart = started.players.find((player) => player.id === host.id);
+  const hostStart = started.players.find((player) => player.id === host.playerId);
   assert.ok(hostStart);
 
-  const jumpEffectPromise = onceMatching(guest, "hazard:effect", (effect) => effect.kind === "jump" && effect.playerId === host.id, 6_000);
-  const airborneRoomPromise = onceMatching(guest, "room:state", (room) => room.players.some((player) => player.id === host.id && player.actionState === "airborne"), 6_000);
+  const jumpEffectPromise = onceMatching(guest, "hazard:effect", (effect) => effect.kind === "jump" && effect.playerId === host.playerId, 6_000);
+  const airborneRoomPromise = onceMatching(guest, "room:state", (room) => room.players.some((player) => player.id === host.playerId && player.actionState === "airborne"), 6_000);
   const [, jumpEffect, airborneRoom] = await Promise.all([
     driveSocket(host, hostStart, [[hostStart.x, 790], [940, 790], [940, 842]]),
     jumpEffectPromise,
     airborneRoomPromise,
   ]);
   assert.ok(jumpEffect.endX < jumpEffect.startX);
-  const airborne = airborneRoom.players.find((player) => player.id === host.id);
+  const airborne = airborneRoom.players.find((player) => player.id === host.playerId);
   assert.equal(airborne?.x, jumpEffect.endX);
   assert.equal(airborne?.y, jumpEffect.endY);
 
@@ -356,7 +362,137 @@ test("jump pads use a server-owned endpoint and lock airborne movement", { timeo
   const inspection = onceMatching(guest, "room:state", (room) => room.code === code);
   guest.emit("combat:shoot", { dx: 1, dy: 0 });
   const lockedRoom = await inspection;
-  const locked = lockedRoom.players.find((player) => player.id === host.id);
+  const locked = lockedRoom.players.find((player) => player.id === host.playerId);
   assert.equal(locked?.x, jumpEffect.endX);
   assert.equal(locked?.actionState, "airborne");
+});
+
+test("stable player sessions restore race state and preserve host authority during the reconnect grace period", { timeout: 15_000 }, async (t) => {
+  const port = await reservePort();
+  const server = spawn(process.execPath, ["server/index.mjs"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      PORT: String(port),
+      CLIENT_ORIGIN: "http://127.0.0.1:5174",
+      MATCH_COUNTDOWN_MS: "120",
+      RECONNECT_GRACE_MS: "350",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  await waitForServer(server);
+  const url = `http://127.0.0.1:${port}`;
+  const sockets = [];
+  t.after(() => {
+    for (const socket of sockets) socket.disconnect();
+    server.kill();
+  });
+
+  const host = await connectClient(url);
+  const guest = await connectClient(url);
+  sockets.push(host, guest);
+  const code = `PM-S${String(port).slice(-3)}`;
+  await request(host, "room:create", {
+    code,
+    name: "SessionHost",
+    config: { lapLimit: 2, playerCount: 2, enabledSkills: ["sleep", "slow", "run"] },
+  });
+  await request(guest, "room:join", { code, name: "SessionGuest" });
+  assert.notEqual(host.playerId, host.id);
+  assert.notEqual(guest.playerId, guest.id);
+  assert.equal(typeof host.session.reconnectToken, "string");
+
+  const startEvent = onceMatching(host, "match:started", (room) => room.code === code);
+  await request(host, "room:start");
+  const started = await startEvent;
+  assert.equal(started.players.every((player) => player.connected), true);
+  assert.equal(started.players.some((player) => Object.hasOwn(player, "reconnectToken")), false);
+
+  const hostState = started.players.find((player) => player.id === host.playerId);
+  assert.ok(hostState);
+  const subject = hostState.skill === "run" ? host : guest;
+  const observer = subject === host ? guest : host;
+  const statusField = hostState.skill === "run" ? "runMs" : `${hostState.skill}Ms`;
+  const subjectStart = started.players.find((player) => player.id === subject.playerId);
+  assert.ok(subjectStart);
+
+  await delay(70);
+  const moved = onceMatching(observer, "player:state", (player) => player.id === subject.playerId && player.x === subjectStart.x + 8);
+  subject.emit("player:state", { x: subjectStart.x + 8, y: subjectStart.y, direction: "right", walking: 1 });
+  await moved;
+
+  const ammoSpent = onceMatching(observer, "room:state", (room) => room.players.some((player) => player.id === subject.playerId && player.ammo === 2));
+  subject.emit("combat:shoot", { dx: subject === host ? -1 : 1, dy: 0 });
+  await ammoSpent;
+
+  const statusApplied = onceMatching(observer, "room:state", (room) => {
+    const player = room.players.find((candidate) => candidate.id === subject.playerId);
+    return Number(player?.[statusField] ?? 0) > 0;
+  }, 3_000);
+  host.emit("combat:skill", { dx: 1, dy: 0 });
+  const beforeDisconnectRoom = await statusApplied;
+  const beforeDisconnect = beforeDisconnectRoom.players.find((player) => player.id === subject.playerId);
+  assert.ok(beforeDisconnect);
+
+  const markedDisconnected = onceMatching(observer, "room:state", (room) => room.players.some((player) => player.id === subject.playerId && !player.connected));
+  subject.disconnect();
+  const disconnectedRoom = await markedDisconnected;
+  const reservedPlayer = disconnectedRoom.players.find((player) => player.id === subject.playerId);
+  assert.equal(reservedPlayer?.connected, false);
+  assert.equal(Number(reservedPlayer?.reconnectMs ?? 0) > 0, true);
+
+  const resumedSubject = await connectClient(url);
+  sockets.push(resumedSubject);
+  const restoredRoom = await request(resumedSubject, "room:resume", subject.session);
+  const restored = restoredRoom.players.find((player) => player.id === subject.playerId);
+  assert.ok(restored);
+  assert.notEqual(restored.id, resumedSubject.id);
+  assert.equal(restored.connected, true);
+  assert.deepEqual(
+    {
+      x: restored.x,
+      y: restored.y,
+      lap: restored.lap,
+      checkpoint: restored.checkpoint,
+      health: restored.health,
+      ammo: restored.ammo,
+      skill: restored.skill,
+      actionState: restored.actionState,
+    },
+    {
+      x: beforeDisconnect.x,
+      y: beforeDisconnect.y,
+      lap: beforeDisconnect.lap,
+      checkpoint: beforeDisconnect.checkpoint,
+      health: beforeDisconnect.health,
+      ammo: beforeDisconnect.ammo,
+      skill: beforeDisconnect.skill,
+      actionState: beforeDisconnect.actionState,
+    },
+  );
+  assert.equal(Number(restored[statusField] ?? 0) > 0, true);
+  assert.equal(Number(restored[statusField] ?? 0) <= Number(beforeDisconnect[statusField] ?? 0), true);
+
+  const currentHostSocket = subject === host ? resumedSubject : host;
+  const remainingGuestSocket = subject === host ? guest : resumedSubject;
+  const hostMarkedDisconnected = onceMatching(remainingGuestSocket, "room:state", (room) => room.hostId === host.playerId && room.players.some((player) => player.id === host.playerId && !player.connected));
+  currentHostSocket.disconnect();
+  const hostReservedRoom = await hostMarkedDisconnected;
+  assert.equal(hostReservedRoom.hostId, host.playerId);
+
+  const resumedHost = await connectClient(url);
+  sockets.push(resumedHost);
+  const hostRestoredRoom = await request(resumedHost, "room:resume", host.session);
+  assert.equal(hostRestoredRoom.hostId, host.playerId);
+  assert.equal(hostRestoredRoom.players.find((player) => player.id === host.playerId)?.connected, true);
+
+  const hostHandedOff = onceMatching(remainingGuestSocket, "room:state", (room) => room.hostId === guest.playerId && !room.players.some((player) => player.id === host.playerId), 3_000);
+  resumedHost.disconnect();
+  const handedOffRoom = await hostHandedOff;
+  assert.equal(handedOffRoom.players.length, 1);
+  assert.equal(handedOffRoom.hostId, guest.playerId);
+
+  const expiredHost = await connectClient(url);
+  sockets.push(expiredHost);
+  await assert.rejects(request(expiredHost, "room:resume", host.session), /만료|올바르지/);
 });
