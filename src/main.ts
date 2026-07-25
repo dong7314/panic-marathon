@@ -147,6 +147,9 @@ app.innerHTML = `
     </main>
 
     <div id="toast" class="toast" role="status"></div>
+    <div id="match-countdown" class="match-countdown hidden" role="status" aria-live="assertive">
+      <span id="match-countdown-value"></span>
+    </div>
   </div>
 `;
 
@@ -195,6 +198,8 @@ const elements = {
   resultToTitle: getElement<HTMLButtonElement>("#result-to-title"),
   resultStatus: getElement<HTMLElement>("#result-status"),
   toast: getElement<HTMLElement>("#toast"),
+  matchCountdown: getElement<HTMLElement>("#match-countdown"),
+  matchCountdownValue: getElement<HTMLElement>("#match-countdown-value"),
 };
 
 function getPixelContext(canvas: HTMLCanvasElement) {
@@ -249,6 +254,8 @@ let grappleLockUntil = 0;
 let pushLockUntil = 0;
 let networkSpinnerElapsedAtSync = 0;
 let networkSpinnerSyncedAt = 0;
+let networkCountdownUntil = 0;
+let networkStartBannerUntil = 0;
 const clones: Clone[] = [];
 const projectiles: Projectile[] = [];
 const grappleEffects: GrappleEffect[] = [];
@@ -1956,6 +1963,7 @@ function drawTown(context: CanvasRenderingContext2D, time: number) {
 function animate(now: number) {
   const dt = Math.min(.05, (now - lastFrame) / 1000);
   lastFrame = now;
+  updateMatchCountdown(now);
   if (titleFallbackActive) drawTitlePreview(now);
   if (gameActive) {
     if (!matchFinished) {
@@ -2134,18 +2142,63 @@ function interpolateRemotePlayers(dt: number) {
   }
 }
 
+function syncNetworkCountdown(room: NetworkRoom) {
+  if (room.countdownMs > 0) {
+    networkCountdownUntil = performance.now() + room.countdownMs;
+    networkStartBannerUntil = 0;
+    pressedKeys.clear();
+    return;
+  }
+  networkCountdownUntil = 0;
+}
+
+function showNetworkStartBanner() {
+  networkCountdownUntil = 0;
+  networkStartBannerUntil = performance.now() + 700;
+}
+
+function clearNetworkCountdown() {
+  networkCountdownUntil = 0;
+  networkStartBannerUntil = 0;
+  elements.matchCountdown.classList.add("hidden");
+  elements.matchCountdown.classList.remove("starting");
+  elements.matchCountdownValue.textContent = "";
+}
+
+function updateMatchCountdown(now: number) {
+  let value = "";
+  let starting = false;
+  if (networkStartBannerUntil > now) {
+    value = "START!";
+    starting = true;
+  } else if (networkCountdownUntil > 0 && activeNetworkRoom?.countdownMs) {
+    value = String(Math.max(1, Math.ceil((networkCountdownUntil - now) / 1000)));
+  }
+  if (!value) {
+    elements.matchCountdown.classList.add("hidden");
+    elements.matchCountdown.classList.remove("starting");
+    elements.matchCountdownValue.textContent = "";
+    return;
+  }
+  elements.matchCountdown.classList.remove("hidden");
+  elements.matchCountdown.classList.toggle("starting", starting);
+  if (elements.matchCountdownValue.textContent !== value) elements.matchCountdownValue.textContent = value;
+}
+
 function updateNetworkWaitingPanel() {
   if (!activeNetworkRoom || activeNetworkRoom.phase !== "waiting" || gameActive) return;
   const isHost = activeNetworkRoom.hostId === socket.id;
+  const countingDown = activeNetworkRoom.countdownMs > 0;
   elements.titleRoomPanel.classList.add("network-waiting");
   elements.titlePanelMarker.textContent = "ONLINE ROOM";
   elements.titlePanelTitle.textContent = `${activeNetworkRoom.code} · ${activeNetworkRoom.players.length}/${activeNetworkRoom.config.playerCount}명`;
-  elements.titleConfirm.textContent = isHost ? "경기 시작" : "방장 시작 대기";
-  elements.titleConfirm.disabled = !isHost || activeNetworkRoom.players.length < 2;
+  elements.titleConfirm.textContent = countingDown ? "출발 준비!" : isHost ? "경기 시작" : "방장 시작 대기";
+  elements.titleConfirm.disabled = countingDown || !isHost || activeNetworkRoom.players.length < 2;
 }
 
 function applyNetworkRoom(room: NetworkRoom) {
   activeNetworkRoom = room;
+  syncNetworkCountdown(room);
   roomConfig = room.config;
   syncNetworkHazards(room.hazards);
   syncRemotePlayers(room);
@@ -2270,6 +2323,7 @@ function startLocalGame(name: string) {
   activeNetworkRoom = undefined;
   activeNetworkRound = 0;
   multiplayerActive = false;
+  clearNetworkCountdown();
   remotePlayers.clear();
   hideMatchResults();
   const now = performance.now();
@@ -2511,6 +2565,7 @@ function returnToTitle() {
   activeNetworkRoom = undefined;
   activeNetworkRound = 0;
   multiplayerActive = false;
+  clearNetworkCountdown();
   remotePlayers.clear();
   clones.length = 0;
   projectiles.length = 0;
@@ -2571,6 +2626,7 @@ function closeTitleRoomPanel() {
   if (activeNetworkRoom && !gameActive) socket.emit("room:leave");
   activeNetworkRoom = undefined;
   if (!gameActive) activeNetworkRound = 0;
+  if (!gameActive) clearNetworkCountdown();
   remotePlayers.clear();
   elements.titleRoomPanel.classList.add("hidden");
   elements.titleRoomPanel.classList.remove("network-waiting");
@@ -2600,7 +2656,6 @@ async function startFromTitleRoomPanel() {
       if (activeNetworkRoom.hostId !== socket.id) return;
       const room = await requestNetworkRoom("room:start");
       applyNetworkRoom(room);
-      startNetworkMatch(room);
       return;
     }
     if (titleRoomMode === "join") {
@@ -2643,7 +2698,8 @@ async function startNetworkRematch() {
   elements.resultStatus.textContent = "출발선을 다시 준비하고 있습니다…";
   try {
     const room = await requestNetworkRoom("room:rematch");
-    startNetworkMatch(room);
+    applyNetworkRoom(room);
+    elements.resultStatus.textContent = "3초 뒤 재대결이 시작됩니다.";
   } catch (error) {
     elements.resultRematch.disabled = activeNetworkRoom.players.length < 2;
     elements.resultStatus.textContent = error instanceof Error ? error.message : "재대결을 시작하지 못했습니다.";
@@ -2793,7 +2849,11 @@ elements.resultRematch.addEventListener("click", () => { void startNetworkRematc
 elements.resultToTitle.addEventListener("click", returnToTitle);
 
 socket.on("room:state", (room: NetworkRoom) => applyNetworkRoom(room));
-socket.on("match:started", (room: NetworkRoom) => startNetworkMatch(room));
+socket.on("match:countdown", (room: NetworkRoom) => applyNetworkRoom(room));
+socket.on("match:started", (room: NetworkRoom) => {
+  showNetworkStartBanner();
+  startNetworkMatch(room);
+});
 socket.on("match:finished", (room: NetworkRoom) => applyNetworkRoom(room));
 socket.on("hazard:warning", (hazards: NetworkHazards) => {
   syncNetworkHazards(hazards);

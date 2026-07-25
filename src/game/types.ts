@@ -124,6 +124,7 @@ export type NetworkRoom = {
   round: number;
   started: boolean;
   finished: boolean;
+  countdownMs: number;
   winner: { id: string; name: string } | null;
   result: NetworkMatchResult | null;
   hazards: NetworkHazards;
