@@ -49,6 +49,7 @@ const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN ?? "http://127.0.0.1:5174";
 const TEST_ROOM_CODE = "TEST";
 const SKILLS = new Set(SKILL_IDS);
 const MATCH_TIME_LIMIT_MS = Math.max(100, Number(process.env.MATCH_TIME_LIMIT_MS) || MATCH_TIME_LIMIT);
+const MATCH_COUNTDOWN_MS = Math.max(100, Number(process.env.MATCH_COUNTDOWN_MS) || 3_000);
 
 const httpServer = createServer();
 const io = new Server(httpServer, {
@@ -158,6 +159,7 @@ function pruneClones(room) {
 
 function snapshot(room) {
   pruneClones(room);
+  const now = Date.now();
   const started = room.phase !== "waiting";
   const finished = room.phase === "finished";
   const winner = room.result?.standings[0] ?? null;
@@ -169,6 +171,7 @@ function snapshot(room) {
     round: room.round,
     started,
     finished,
+    countdownMs: room.countdownEndsAt > 0 ? Math.max(0, room.countdownEndsAt - now) : 0,
     winner: winner ? { id: winner.id, name: winner.name } : null,
     result: room.result,
     hazards: publicHazards(room),
@@ -193,6 +196,7 @@ function leaveCurrentRoom(socket) {
     rooms.delete(code);
     return;
   }
+  if (room.countdownEndsAt > 0 && room.players.size < 2) room.countdownEndsAt = 0;
   if (room.hostId === socket.id) room.hostId = room.players.keys().next().value;
   broadcastRoom(room);
 }
@@ -435,6 +439,7 @@ function buildMatchResult(room, reason, now, winnerId) {
 function finishRoom(room, reason, now = Date.now(), winnerId) {
   if (room.phase !== "running") return false;
   room.phase = "finished";
+  room.countdownEndsAt = 0;
   room.result = buildMatchResult(room, reason, now, winnerId);
   room.clones.length = 0;
   room.projectiles.length = 0;
@@ -443,6 +448,7 @@ function finishRoom(room, reason, now = Date.now(), winnerId) {
 }
 
 function startRoomMatch(room, now = Date.now()) {
+  room.countdownEndsAt = 0;
   room.phase = "running";
   room.round += 1;
   room.result = null;
@@ -451,6 +457,10 @@ function startRoomMatch(room, now = Date.now()) {
   room.projectiles.length = 0;
   resetRoomHazards(room, now);
   resetPlayers(room, now);
+}
+
+function startRoomCountdown(room, now = Date.now()) {
+  room.countdownEndsAt = now + MATCH_COUNTDOWN_MS;
 }
 
 function blockedByClone(room, x, y) {
@@ -744,6 +754,7 @@ io.on("connection", (socket) => {
       round: 0,
       result: null,
       matchStartedAt: 0,
+      countdownEndsAt: 0,
       hazards: createHazardState(),
     };
     rooms.set(code, room);
@@ -770,6 +781,7 @@ io.on("connection", (socket) => {
         round: 1,
         result: null,
         matchStartedAt: Date.now(),
+        countdownEndsAt: 0,
         hazards: createHazardState(),
       };
       rooms.set(TEST_ROOM_CODE, room);
@@ -780,6 +792,10 @@ io.on("connection", (socket) => {
     }
     if (room.phase !== "waiting" && code !== TEST_ROOM_CODE) {
       ack(callback, { ok: false, error: "이미 진행 중인 경기입니다." });
+      return;
+    }
+    if (room.countdownEndsAt > 0) {
+      ack(callback, { ok: false, error: "출발 카운트다운이 진행 중입니다." });
       return;
     }
     if (room.players.size >= room.config.playerCount) {
@@ -806,10 +822,14 @@ io.on("connection", (socket) => {
       ack(callback, { ok: false, error: "대기 중인 방에서만 경기를 시작할 수 있습니다." });
       return;
     }
-    startRoomMatch(room);
+    if (room.countdownEndsAt > 0) {
+      ack(callback, { ok: false, error: "이미 출발 카운트다운이 진행 중입니다." });
+      return;
+    }
+    startRoomCountdown(room);
     const roomSnapshot = snapshot(room);
     ack(callback, { ok: true, room: roomSnapshot });
-    io.to(room.code).emit("match:started", roomSnapshot);
+    io.to(room.code).emit("match:countdown", roomSnapshot);
     broadcastRoom(room);
   });
 
@@ -827,10 +847,14 @@ io.on("connection", (socket) => {
       ack(callback, { ok: false, error: "최소 2명이 참가해야 재대결할 수 있습니다." });
       return;
     }
-    startRoomMatch(room);
+    if (room.countdownEndsAt > 0) {
+      ack(callback, { ok: false, error: "이미 출발 카운트다운이 진행 중입니다." });
+      return;
+    }
+    startRoomCountdown(room);
     const roomSnapshot = snapshot(room);
     ack(callback, { ok: true, room: roomSnapshot });
-    io.to(room.code).emit("match:started", roomSnapshot);
+    io.to(room.code).emit("match:countdown", roomSnapshot);
     broadcastRoom(room);
   });
 
@@ -1005,6 +1029,19 @@ io.on("connection", (socket) => {
 const hazardTimer = setInterval(() => {
   const now = Date.now();
   for (const room of rooms.values()) {
+    if (room.countdownEndsAt > 0) {
+      if (room.players.size < 2) {
+        room.countdownEndsAt = 0;
+        broadcastRoom(room);
+        continue;
+      }
+      if (now < room.countdownEndsAt) continue;
+      startRoomMatch(room, now);
+      const roomSnapshot = snapshot(room);
+      io.to(room.code).emit("match:started", roomSnapshot);
+      broadcastRoom(room);
+      continue;
+    }
     if (room.phase !== "running") continue;
     if (now - room.matchStartedAt >= MATCH_TIME_LIMIT_MS) {
       finishRoom(room, "time-limit", now);
