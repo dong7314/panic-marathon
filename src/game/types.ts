@@ -1,9 +1,24 @@
 import type { SkillId } from "../../shared/game-rules.mjs";
 import type { MapId } from "../../shared/map-catalog.mjs";
+import type { GeneratedPitZone, GeneratedSpinner } from "../../shared/map-hazards.mjs";
 import type { PlayerActionState } from "../../shared/player-state.mjs";
 
 export type Direction = "down" | "up" | "left" | "right";
-export type PropKind = "vending" | "bench" | "crate" | "plant" | "table" | "lamp" | "sofa" | "mailbox" | "arcade";
+export type PropKind =
+  | "vending"
+  | "bench"
+  | "crate"
+  | "plant"
+  | "table"
+  | "lamp"
+  | "sofa"
+  | "mailbox"
+  | "arcade"
+  | "rockwall"
+  | "traffic-cone"
+  | "school-hurdle"
+  | "space-crate"
+  | "space-pylon";
 
 export type WorldProp = {
   kind: PropKind;
@@ -12,6 +27,7 @@ export type WorldProp = {
   width: number;
   height: number;
   solid?: boolean;
+  axis?: "horizontal" | "vertical";
 };
 
 export type Player = {
@@ -24,10 +40,13 @@ export type Player = {
   knockbackX: number;
   knockbackY: number;
   hitUntil: number;
+  flattenedUntil: number;
+  flattenedStartedAt: number;
   fallingUntil: number;
   fallingStartedAt: number;
   fallTargetX: number;
   fallTargetY: number;
+  fallKind?: "pit" | "void";
   airUntil: number;
   airStartedAt: number;
   dashUntil: number;
@@ -71,10 +90,13 @@ export type NetworkPlayer = {
   sleepMs?: number;
   slowMs?: number;
   runMs?: number;
+  flattenedMs?: number;
+  flattenedElapsedMs?: number;
   fallingMs?: number;
   fallingElapsedMs?: number;
   fallTargetX?: number;
   fallTargetY?: number;
+  fallKind?: "pit" | "void";
   airMs?: number;
   airElapsedMs?: number;
   airStartX?: number;
@@ -86,6 +108,19 @@ export type NetworkPlayer = {
 };
 
 export type NetworkClone = { id: string; ownerId: string; x: number; y: number; direction: Direction; until: number };
+export type RollingRock = { id: string; x: number; y: number; velocityX: number; velocityY: number; radius: number; until: number; angle: number };
+export type NetworkRock = { id: string; x: number; y: number; velocityX: number; velocityY: number; radius: number; remainingMs: number };
+export type NetworkObstacle = {
+  id: string;
+  bandId: string;
+  laneIndex: number;
+  axis: "horizontal" | "vertical";
+  kind: Extract<PropKind, "traffic-cone" | "school-hurdle" | "space-crate" | "space-pylon">;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
 export type NetworkHazards = { activePitIndex: number; warningPitIndex: number; warningMs: number; nextPitMs: number; spinnerElapsedMs: number };
 export type NetworkRoomPhase = "waiting" | "running" | "finished";
 export type NetworkStanding = {
@@ -115,6 +150,8 @@ export type RemotePlayer = NetworkPlayer & {
   fallTargetY: number;
   airStartedAt: number;
   airUntil: number;
+  flattenedStartedAt: number;
+  flattenedUntil: number;
   slowEffectUntil: number;
   sleepEffectUntil: number;
 };
@@ -133,6 +170,10 @@ export type NetworkRoom = {
   hazards: NetworkHazards;
   players: NetworkPlayer[];
   clones: NetworkClone[];
+  obstacles: NetworkObstacle[];
+  pitZones: GeneratedPitZone[];
+  spinners: GeneratedSpinner[];
+  rocks: NetworkRock[];
 };
 export type NetworkSession = { roomCode: string; playerId: string; reconnectToken: string };
 export type NetworkResponse = { ok: true; room: NetworkRoom; session?: NetworkSession } | { ok: false; error: string };
@@ -142,5 +183,6 @@ export type PushEffect = { sourceId: string; targetId: string; startX: number; s
 export type SlowImpact = { x: number; y: number; startedAt: number; until: number };
 export type HazardEffect =
   | { kind: "pit"; playerId: string; duration: number; targetX: number; targetY: number }
+  | { kind: "void"; playerId: string; duration: number; targetX: number; targetY: number }
   | { kind: "jump"; playerId: string; duration: number; startX: number; startY: number; endX: number; endY: number }
-  | { kind: "respawn"; playerId: string; x: number; y: number; ammo: number };
+  | { kind: "respawn"; reason?: "rock" | "pit" | "void"; playerId: string; x: number; y: number; health: number; ammo: number };

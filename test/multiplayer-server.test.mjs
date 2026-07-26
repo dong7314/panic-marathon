@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { createServer } from "node:net";
 import test from "node:test";
 import { io } from "socket.io-client";
+import { runnerTouchesObstacle } from "../shared/game-rules.mjs";
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -106,9 +107,229 @@ async function driveSocket(socket, start, waypoints, stepSize = 12, intervalMs =
       socket.emit("player:state", { x, y, direction: Math.abs(dx) > Math.abs(dy) ? "right" : "down", walking: 1 });
     }
   }
+  return { x, y };
 }
 
-test("multiplayer rooms preserve names and reject movement into the infield", { timeout: 15_000 }, async (t) => {
+function safeLoopBoundary(room, side) {
+  const spinner = room.spinners.find((candidate) => candidate.side === side);
+  if (side === "bottom") return !spinner || spinner.y <= 856 ? 934 : 792;
+  if (side === "right") return !spinner || spinner.x <= 1192 ? 1276 : 1109;
+  if (side === "top") return !spinner || spinner.y <= 112 ? 180 : 40;
+  return !spinner || spinner.x <= 120 ? 203 : 36;
+}
+
+const MOUNTAIN_CLIMB_ROUTE = Object.freeze([
+  [428, 1178],
+  [623, 993],
+  [750, 915],
+  [869, 858],
+  [1043, 761],
+  [1140, 615],
+  [1275, 555],
+  [1358, 505],
+  [1420, 471],
+  [1501, 474],
+  [1579, 511],
+  [1630, 500],
+  [1677, 462],
+  [1735, 402],
+]);
+
+test("mountain rooms teleport completed laps and stop the first rolling rock at a barrier", { timeout: 24_000 }, async (t) => {
+  const port = await reservePort();
+  const server = spawn(process.execPath, ["server/index.mjs"], {
+    cwd: process.cwd(),
+    env: { ...process.env, PORT: String(port), CLIENT_ORIGIN: "http://127.0.0.1:5174", MATCH_COUNTDOWN_MS: "120" },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  await waitForServer(server);
+
+  const url = `http://127.0.0.1:${port}`;
+  const host = await connectClient(url);
+  const guest = await connectClient(url);
+  t.after(() => {
+    host.disconnect();
+    guest.disconnect();
+    server.kill();
+  });
+
+  const code = `PM-M${String(port).slice(-3)}`;
+  await request(host, "room:create", {
+    code,
+    name: "Climber",
+    config: {
+      lapLimit: 2,
+      playerCount: 2,
+      mapId: "mountain-pass",
+      enabledSkills: ["push", "dash", "run"],
+    },
+  });
+  await request(guest, "room:join", { code, name: "Sherpa" });
+  const startedEvent = onceMatching(host, "match:started", (room) => room.code === code);
+  await request(host, "room:start");
+  const started = await startedEvent;
+  assert.equal(started.config.mapId, "mountain-pass");
+  assert.equal(started.rocks.length, 0);
+  assert.equal(started.pitZones.length, 0);
+  assert.equal(started.spinners.length, 0);
+
+  const self = started.players.find((player) => player.id === host.playerId);
+  const rockSpawnEvent = onceMatching(host, "hazard:rock:spawn", (rock) => rock.id === "1:0", 12_000);
+  const rockRemoveEvent = onceMatching(host, "hazard:rock:remove", (event) => event.id === "1:0", 12_000);
+  const lapStateEvent = onceMatching(
+    host,
+    "room:state",
+    (room) => room.players.some((player) => player.id === host.playerId && player.lap === 1),
+    18_000,
+  );
+  await driveSocket(host, self, [...MOUNTAIN_CLIMB_ROUTE, [1857, 303]]);
+  const lapState = await lapStateEvent;
+  const teleported = lapState.players.find((player) => player.id === host.playerId);
+  assert.equal(teleported.lap, 1);
+  assert.equal(teleported.checkpoint, 0);
+  assert.deepEqual({ x: teleported.x, y: teleported.y }, { x: 132, y: 1263 });
+
+  const spawned = await rockSpawnEvent;
+  assert.equal(spawned.radius, 14);
+  const removed = await rockRemoveEvent;
+  assert.equal(removed.reason, "barrier");
+});
+
+test("mountain flying runners activate checkpoints at the elevated sprite position", { timeout: 12_000 }, async (t) => {
+  const port = await reservePort();
+  const server = spawn(
+    process.execPath,
+    ["--import", "data:text/javascript,Math.random=()=>0", "server/index.mjs"],
+    {
+      cwd: process.cwd(),
+      env: { ...process.env, PORT: String(port), CLIENT_ORIGIN: "http://127.0.0.1:5174", MATCH_COUNTDOWN_MS: "120" },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  await waitForServer(server);
+
+  const url = `http://127.0.0.1:${port}`;
+  const host = await connectClient(url);
+  const guest = await connectClient(url);
+  t.after(() => {
+    host.disconnect();
+    guest.disconnect();
+    server.kill();
+  });
+
+  const code = `PM-F${String(port).slice(-3)}`;
+  await request(host, "room:create", {
+    code,
+    name: "Flyer",
+    config: {
+      lapLimit: 2,
+      playerCount: 2,
+      mapId: "mountain-pass",
+      enabledSkills: ["push", "fly", "dash"],
+    },
+  });
+  await request(guest, "room:join", { code, name: "Observer" });
+  const startedEvent = onceMatching(host, "match:started", (room) => room.code === code);
+  await request(host, "room:start");
+  const started = await startedEvent;
+  const self = started.players.find((player) => player.id === host.playerId);
+  assert.equal(self.skill, "fly");
+
+  const checkpointEvent = onceMatching(
+    host,
+    "room:state",
+    (room) => room.players.some((runner) => runner.id === host.playerId && runner.checkpoint === 1),
+    6000,
+  );
+  await driveSocket(host, self, [
+    [428, 1178],
+    [623, 1058],
+  ]);
+  const checkpointRoom = await checkpointEvent;
+  const flyer = checkpointRoom.players.find((runner) => runner.id === host.playerId);
+  assert.equal(flyer.checkpoint, 1);
+});
+
+test("rolling rocks squash runners before checkpoint recovery", { timeout: 24_000 }, async (t) => {
+  const port = await reservePort();
+  const server = spawn(process.execPath, ["server/index.mjs"], {
+    cwd: process.cwd(),
+    env: { ...process.env, PORT: String(port), CLIENT_ORIGIN: "http://127.0.0.1:5174", MATCH_COUNTDOWN_MS: "120" },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  await waitForServer(server);
+
+  const url = `http://127.0.0.1:${port}`;
+  const host = await connectClient(url);
+  const guest = await connectClient(url);
+  t.after(() => {
+    host.disconnect();
+    guest.disconnect();
+    server.kill();
+  });
+
+  const code = `PM-R${String(port).slice(-3)}`;
+  await request(host, "room:create", {
+    code,
+    name: "Target",
+    config: {
+      lapLimit: 2,
+      playerCount: 2,
+      mapId: "mountain-pass",
+      enabledSkills: ["push", "dash", "run"],
+    },
+  });
+  await request(guest, "room:join", { code, name: "Witness" });
+  const startedEvent = onceMatching(host, "match:started", (room) => room.code === code);
+  await request(host, "room:start");
+  const started = await startedEvent;
+  const self = started.players.find((player) => player.id === host.playerId);
+
+  let hitDetectedAt = 0;
+  const hitEvent = onceMatching(
+    host,
+    "hazard:rock:remove",
+    (event) => {
+      const matched = event.reason === "player" && event.playerId === host.playerId;
+      if (matched) hitDetectedAt = Date.now();
+      return matched;
+    },
+    18_000,
+  );
+  const flattenedStateEvent = onceMatching(
+    host,
+    "room:state",
+    (room) => room.players.some((runner) => (
+      runner.id === host.playerId
+      && runner.actionState === "flattened"
+      && runner.flattenedMs > 0
+    )),
+    18_000,
+  );
+  const respawnEvent = onceMatching(
+    host,
+    "hazard:effect",
+    (event) => event.kind === "respawn" && event.reason === "rock" && event.playerId === host.playerId,
+    18_000,
+  );
+  await driveSocket(host, self, [...MOUNTAIN_CLIMB_ROUTE, [1777, 301]]);
+
+  await hitEvent;
+  const flattenedRoom = await flattenedStateEvent;
+  const flattened = flattenedRoom.players.find((runner) => runner.id === host.playerId);
+  assert.equal(flattened.health, 4);
+  assert.equal(flattened.checkpoint, 3);
+  assert.equal(flattened.actionState, "flattened");
+
+  const respawn = await respawnEvent;
+  assert.ok(Date.now() - hitDetectedAt >= 600);
+  assert.deepEqual(
+    { x: respawn.x, y: respawn.y, health: respawn.health, ammo: respawn.ammo },
+    { x: 1464, y: 530, health: 4, ammo: 3 },
+  );
+});
+
+test("multiplayer rooms preserve names and reject movement into the infield and generated obstacles", { timeout: 20_000 }, async (t) => {
   const port = await reservePort();
   const server = spawn(process.execPath, ["server/index.mjs"], {
     cwd: process.cwd(),
@@ -154,6 +375,12 @@ test("multiplayer rooms preserve names and reject movement into the infield", { 
   assert.equal(started.phase, "running");
   assert.equal(started.countdownMs, 0);
   assert.equal(started.hazards.spinnerElapsedMs >= 0, true);
+  assert.equal(started.obstacles.length >= 8, true);
+  assert.equal(started.obstacles.every((obstacle) => ["traffic-cone", "school-hurdle"].includes(obstacle.kind)), true);
+  assert.equal(started.pitZones.length, 4);
+  assert.equal(started.spinners.length, 3);
+  assert.equal(new Set(started.pitZones.map((pit) => pit.side)).size, 4);
+  assert.equal(new Set(started.spinners.map((spinner) => spinner.side)).size, 3);
 
   for (const x of [144, 160, 176, 192, 208, 224, 240]) {
     await delay(70);
@@ -177,6 +404,165 @@ test("multiplayer rooms preserve names and reject movement into the infield", { 
   const snapshot = await roomState;
   const hostState = snapshot.players.find((player) => player.id === host.playerId);
   assert.deepEqual({ x: hostState?.x, y: hostState?.y }, { x: 240, y: 792 });
+
+  const obstacle = started.obstacles
+    .filter((candidate) => candidate.bandId === "bottom-west")
+    .sort((left, right) => right.y - left.y)[0];
+  assert.ok(obstacle);
+  const obstacleCenterX = obstacle.x + obstacle.width / 2;
+  const obstacleCenterY = obstacle.y + obstacle.height / 2;
+  await driveSocket(host, hostState, [[240, 934], [obstacleCenterX, 934], [obstacleCenterX, obstacleCenterY]], 8, 40);
+  const obstacleInspection = onceMatching(host, "room:state", (room) => room.code === code);
+  guest.emit("combat:shoot", { dx: 1, dy: 0 });
+  const obstacleSnapshot = await obstacleInspection;
+  const blockedHost = obstacleSnapshot.players.find((player) => player.id === host.playerId);
+  assert.equal(runnerTouchesObstacle(blockedHost.x, blockedHost.y, obstacle), false);
+  assert.notDeepEqual({ x: blockedHost.x, y: blockedHost.y }, { x: obstacleCenterX, y: obstacleCenterY });
+});
+
+test("space-station rooms fall outward from the upper edge, then respawn", { timeout: 15_000 }, async (t) => {
+  const port = await reservePort();
+  const server = spawn(process.execPath, ["server/index.mjs"], {
+    cwd: process.cwd(),
+    env: { ...process.env, PORT: String(port), CLIENT_ORIGIN: "http://127.0.0.1:5174", MATCH_COUNTDOWN_MS: "120" },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  await waitForServer(server);
+
+  const url = `http://127.0.0.1:${port}`;
+  const host = await connectClient(url);
+  const guest = await connectClient(url);
+  t.after(() => {
+    host.disconnect();
+    guest.disconnect();
+    server.kill();
+  });
+
+  const code = `PM-S${String(port).slice(-3)}`;
+  await request(host, "room:create", {
+    code,
+    name: "Orbit",
+    config: {
+      lapLimit: 2,
+      playerCount: 2,
+      mapId: "space-station",
+      enabledSkills: ["push", "dash", "run"],
+    },
+  });
+  await request(guest, "room:join", { code, name: "Dock" });
+  const startedEvent = onceMatching(host, "match:started", (room) => room.code === code);
+  await request(host, "room:start");
+  const started = await startedEvent;
+  assert.equal(started.config.mapId, "space-station");
+  assert.equal(started.pitZones.length, 2);
+  assert.equal(started.spinners.length, 3);
+  assert.equal(new Set(started.pitZones.map((pit) => pit.side)).size, 2);
+  assert.equal(new Set(started.spinners.map((spinner) => spinner.side)).size, 3);
+
+  const hostStart = started.players.find((player) => player.id === host.playerId);
+  assert.ok(hostStart);
+  const fallEffectPromise = onceMatching(
+    guest,
+    "hazard:effect",
+    (effect) => effect.kind === "void" && effect.playerId === host.playerId,
+    5_000,
+  );
+  const respawnEffectPromise = onceMatching(
+    guest,
+    "hazard:effect",
+    (effect) => effect.kind === "respawn" && effect.playerId === host.playerId,
+    5_000,
+  );
+
+  const safeLeftX = safeLoopBoundary(started, "left");
+  await driveSocket(host, hostStart, [
+    [safeLeftX, hostStart.y],
+    [safeLeftX, 200],
+    [150, 200],
+    [150, 24],
+  ], 12, 30);
+  const fallEffect = await fallEffectPromise;
+  assert.equal(fallEffect.kind, "void");
+  assert.equal(fallEffect.targetX, 150);
+  assert.ok(fallEffect.targetY < 32);
+  const respawnEffect = await respawnEffectPromise;
+  assert.deepEqual(
+    { x: respawnEffect.x, y: respawnEffect.y, health: respawnEffect.health, ammo: respawnEffect.ammo },
+    { x: 128, y: 856, health: 5, ammo: 3 },
+  );
+});
+
+test("TEST mode grants a different skill at every checkpoint and completed lap", { timeout: 15_000 }, async (t) => {
+  const port = await reservePort();
+  const server = spawn(process.execPath, ["server/index.mjs"], {
+    cwd: process.cwd(),
+    env: { ...process.env, PORT: String(port), CLIENT_ORIGIN: "http://127.0.0.1:5174" },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  await waitForServer(server);
+
+  const url = `http://127.0.0.1:${port}`;
+  const host = await connectClient(url);
+  t.after(() => {
+    host.disconnect();
+    server.kill();
+  });
+
+  const code = "TEST";
+  const started = await request(host, "room:join", { code, name: "TestRunner" });
+  assert.equal(started.phase, "running");
+  const hostStart = started.players.find((player) => player.id === host.playerId);
+  assert.ok(hostStart);
+  const safeBottomY = safeLoopBoundary(started, "bottom");
+  const safeRightX = safeLoopBoundary(started, "right");
+  const safeTopY = safeLoopBoundary(started, "top");
+  const safeLeftX = safeLoopBoundary(started, "left");
+
+  async function reachProgress(from, expectedLap, expectedCheckpoint, waypoints) {
+    const roomPromise = onceMatching(host, "room:state", (room) => (
+      room.code === code
+      && room.players.some((player) => (
+        player.id === host.playerId
+        && player.lap === expectedLap
+        && player.checkpoint === expectedCheckpoint
+      ))
+    ), 8_000);
+    const drivenPosition = await driveSocket(host, from, waypoints, 12, 5);
+    const room = await roomPromise.catch((error) => {
+      throw new Error(`lap ${expectedLap}, checkpoint ${expectedCheckpoint}: ${error.message}`);
+    });
+    const player = room.players.find((candidate) => candidate.id === host.playerId);
+    assert.ok(player);
+    assert.notEqual(player.skill, from.skill);
+    return { ...player, ...drivenPosition };
+  }
+
+  const checkpoint1 = await reachProgress(hostStart, 0, 1, [
+    [hostStart.x, safeBottomY],
+    [1134, safeBottomY],
+    [1134, 856],
+  ]);
+  const checkpoint2 = await reachProgress(checkpoint1, 0, 2, [
+    [safeRightX, 856],
+    [safeRightX, 140],
+    [1152, 140],
+  ]);
+  const checkpoint3 = await reachProgress(checkpoint2, 0, 3, [
+    [1152, 40],
+    [880, 40],
+    [850, safeTopY],
+    [550, safeTopY],
+    [520, 40],
+    [200, 40],
+    [128, 120],
+  ]);
+  const nextLap = await reachProgress(checkpoint3, 1, 0, [
+    [safeLeftX, 120],
+    [safeLeftX, 856],
+    [150, 856],
+  ]);
+  assert.equal(nextLap.lap, 1);
+  assert.equal(nextLap.checkpoint, 0);
 });
 
 test("a finished room publishes full standings and lets only the host start a rematch", { timeout: 10_000 }, async (t) => {
@@ -281,6 +667,12 @@ test("2, 4, and 6 player rooms start with consistent state and propagate movemen
     assert.equal(started.players.length, playerCount);
     assert.equal(receivedStarts.every((room) => room.round === 1 && room.phase === "running"), true);
     assert.equal(started.players.every((player) => player.actionState === "normal"), true);
+    assert.equal(started.obstacles.length >= 8, true);
+    assert.equal(receivedStarts.every((room) => JSON.stringify(room.obstacles) === JSON.stringify(started.obstacles)), true);
+    assert.equal(started.pitZones.length, 4);
+    assert.equal(started.spinners.length, 3);
+    assert.equal(receivedStarts.every((room) => JSON.stringify(room.pitZones) === JSON.stringify(started.pitZones)), true);
+    assert.equal(receivedStarts.every((room) => JSON.stringify(room.spinners) === JSON.stringify(started.spinners)), true);
 
     const movements = clients.map((client, index) => {
       const initial = started.players.find((player) => player.id === client.playerId);
@@ -314,7 +706,7 @@ test("2, 4, and 6 player rooms start with consistent state and propagate movemen
   }
 });
 
-test("jump pads use a server-owned endpoint and lock airborne movement", { timeout: 12_000 }, async (t) => {
+test("jump pads use a server-owned endpoint and lock airborne movement", { timeout: 18_000 }, async (t) => {
   const port = await reservePort();
   const server = spawn(process.execPath, ["server/index.mjs"], {
     cwd: process.cwd(),
@@ -345,10 +737,10 @@ test("jump pads use a server-owned endpoint and lock airborne movement", { timeo
   const hostStart = started.players.find((player) => player.id === host.playerId);
   assert.ok(hostStart);
 
-  const jumpEffectPromise = onceMatching(guest, "hazard:effect", (effect) => effect.kind === "jump" && effect.playerId === host.playerId, 6_000);
-  const airborneRoomPromise = onceMatching(guest, "room:state", (room) => room.players.some((player) => player.id === host.playerId && player.actionState === "airborne"), 6_000);
+  const jumpEffectPromise = onceMatching(guest, "hazard:effect", (effect) => effect.kind === "jump" && effect.playerId === host.playerId, 10_000);
+  const airborneRoomPromise = onceMatching(guest, "room:state", (room) => room.players.some((player) => player.id === host.playerId && player.actionState === "airborne"), 10_000);
   const [, jumpEffect, airborneRoom] = await Promise.all([
-    driveSocket(host, hostStart, [[hostStart.x, 790], [940, 790], [940, 842]]),
+    driveSocket(host, hostStart, [[hostStart.x, 934], [940, 934], [940, 842]]),
     jumpEffectPromise,
     airborneRoomPromise,
   ]);

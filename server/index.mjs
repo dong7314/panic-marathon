@@ -14,7 +14,6 @@ import {
   sanitizePlayerName,
 } from "./room-state.mjs";
 import {
-  CHECKPOINTS,
   CLONE_COOLDOWN,
   CLONE_DURATION,
   CLONE_LIMIT,
@@ -30,17 +29,28 @@ import {
   PLAYER_COLORS as COLORS,
   PUSH_DISTANCE,
   PUSH_DURATION,
-  RESPAWN_POINTS,
+  ROCK_SQUASH_DURATION,
   RUN_DURATION,
   SKILL_IDS,
-  SPAWN_POINTS as SPAWNS,
-  START_GATE,
-  WORLD_HEIGHT,
-  WORLD_WIDTH,
+  getSkillHitRadius,
+  getSkillSpeedMultiplier,
+  isDamageImmune,
+  isGroundHazardImmune,
+  isGiantBodyMovementBlocked,
+  isObstacleImmune,
+  isPassiveSkill,
+  isVoidFallImmune,
+  isTargetOnAimLine,
+  isTargetWithinScaledRange,
   pickNextSkill,
+  runnersOverlap,
+  runnerTouchesRaceZone,
+  runnerTouchesObstacle,
 } from "../shared/game-rules.mjs";
 import { DEFAULT_MAP_ID, getMapDefinition } from "../shared/map-catalog.mjs";
-import { canStandOnTrack, pointSegmentDistance } from "../shared/geometry.mjs";
+import { generateMapHazards } from "../shared/map-hazards.mjs";
+import { generateMapObstacles } from "../shared/map-obstacles.mjs";
+import { canStandOnMap, getTrackFallTarget, pointSegmentDistance } from "../shared/geometry.mjs";
 import { isMovementAllowed } from "../shared/movement-validation.mjs";
 import {
   canPlayerAct,
@@ -50,6 +60,7 @@ import {
   enterAirborneState,
   enterDisplacementState,
   enterFallingState,
+  enterFlattenedState,
   getPlayerActionState,
   getPlayerActionStateRemaining,
   resetPlayerTimedStates,
@@ -109,11 +120,19 @@ function rollSkill(room, previousSkill) {
   return pickNextSkill(room.config.enabledSkills, previousSkill);
 }
 
+function grantNextRaceSkill(room, player) {
+  player.skill = rollSkill(room, player.skill);
+  player.nextSkillAt = 0;
+  player.dashCharges = 3;
+  player.dashRechargeAt = 0;
+}
+
 function createHazardState(now = Date.now()) {
   return { activePitIndex: -1, warningPitIndex: -1, nextPitAt: now + FIRST_PIT_WARNING_DELAY, openAt: 0 };
 }
 
 function publicHazards(room, now = Date.now()) {
+  const hasPits = room.pitZones.length > 0;
   const warningMs = room.hazards.warningPitIndex >= 0 ? Math.max(0, room.hazards.openAt - now) : 0;
   const spinnerElapsedMs = room.matchStartedAt > 0
     ? room.result?.durationMs ?? Math.max(0, now - room.matchStartedAt)
@@ -122,7 +141,7 @@ function publicHazards(room, now = Date.now()) {
     activePitIndex: room.hazards.activePitIndex,
     warningPitIndex: room.hazards.warningPitIndex,
     warningMs,
-    nextPitMs: warningMs || Math.max(0, room.hazards.nextPitAt - now),
+    nextPitMs: hasPits ? warningMs || Math.max(0, room.hazards.nextPitAt - now) : 0,
     spinnerElapsedMs,
   };
 }
@@ -162,10 +181,15 @@ function publicPlayer(player, room) {
     sleepMs: Math.max(0, player.sleepUntil - now),
     slowMs: Math.max(0, player.slowUntil - now),
     runMs: Math.max(0, player.runUntil - now),
+    flattenedMs: Math.max(0, player.flattenedUntil - now),
+    flattenedElapsedMs: player.flattenedUntil > now
+      ? ROCK_SQUASH_DURATION - (player.flattenedUntil - now)
+      : 0,
     fallingMs: Math.max(0, player.fallingUntil - now),
     fallingElapsedMs: player.fallingUntil > now ? PIT_FALL_DURATION - (player.fallingUntil - now) : 0,
     fallTargetX: player.fallTargetX,
     fallTargetY: player.fallTargetY,
+    fallKind: player.fallKind,
     airMs: Math.max(0, player.airUntil - now),
     airElapsedMs: player.airUntil > now ? JUMP_DURATION - (player.airUntil - now) : 0,
     airStartX: player.airStartX,
@@ -202,6 +226,18 @@ function snapshot(room) {
     hazards: publicHazards(room),
     players: [...room.players.values()].map((player) => publicPlayer(player, room)),
     clones: room.clones.map((clone) => ({ ...clone })),
+    obstacles: room.obstacles.map((obstacle) => ({ ...obstacle })),
+    pitZones: room.pitZones.map((pit) => ({ ...pit })),
+    spinners: room.spinners.map((spinner) => ({ ...spinner })),
+    rocks: room.rocks.map((rock) => ({
+      id: rock.id,
+      x: rock.x,
+      y: rock.y,
+      velocityX: rock.velocityX,
+      velocityY: rock.velocityY,
+      radius: rock.radius,
+      remainingMs: Math.max(0, rock.until - now),
+    })),
   };
 }
 
@@ -267,7 +303,8 @@ function disconnectCurrentRoom(socket, now = Date.now()) {
 
 function addPlayer(room, socket, name) {
   const index = room.players.size;
-  const spawn = SPAWNS[index] ?? SPAWNS[0];
+  const spawns = mapForRoom(room).spawnPoints;
+  const spawn = spawns[index] ?? spawns[0];
   const identity = createPlayerIdentity();
   const player = {
     ...identity,
@@ -296,9 +333,11 @@ function addPlayer(room, socket, name) {
     dashCharges: 3,
     dashRechargeAt: 0,
     pushUntil: 0,
+    flattenedUntil: 0,
     fallingUntil: 0,
     fallTargetX: spawn.x,
     fallTargetY: spawn.y,
+    fallKind: undefined,
     airUntil: 0,
     airStartX: spawn.x,
     airStartY: spawn.y,
@@ -313,25 +352,24 @@ function addPlayer(room, socket, name) {
 }
 
 function resetPlayers(room, now = Date.now()) {
+  const spawns = mapForRoom(room).spawnPoints;
   [...room.players.values()].forEach((player, index) => {
-    const spawn = SPAWNS[index] ?? SPAWNS[0];
+    const spawn = spawns[index] ?? spawns[0];
     player.x = spawn.x;
     player.y = spawn.y;
     player.direction = "right";
     player.walking = index;
     player.health = 5;
     player.ammo = 3;
-    player.skill = rollSkill(room, player.skill);
+    grantNextRaceSkill(room, player);
     player.lap = 0;
     player.checkpoint = 0;
     player.lastUpdateAt = now;
     player.nextShotAt = 0;
-    player.nextSkillAt = 0;
     resetPlayerTimedStates(player);
-    player.dashCharges = 3;
-    player.dashRechargeAt = 0;
     player.fallTargetX = spawn.x;
     player.fallTargetY = spawn.y;
+    player.fallKind = undefined;
     player.airStartX = spawn.x;
     player.airStartY = spawn.y;
     player.airEndX = spawn.x;
@@ -376,6 +414,7 @@ function spawnSkillProjectile(room, attacker, skill, aim, now) {
 }
 
 function updateSkillProjectiles(room, now) {
+  const map = mapForRoom(room);
   let stateChanged = false;
   for (let index = room.projectiles.length - 1; index >= 0; index -= 1) {
     const projectile = room.projectiles[index];
@@ -388,13 +427,13 @@ function updateSkillProjectiles(room, now) {
     let hitTarget;
     for (const target of room.players.values()) {
       if (!target.connected || target.id === projectile.sourceId || !canPlayerReceiveHit(target, now)) continue;
-      if (pointSegmentDistance(target.x, target.y, startX, startY, projectile.x, projectile.y) > 12) continue;
+      if (pointSegmentDistance(target.x, target.y, startX, startY, projectile.x, projectile.y) > getSkillHitRadius(target.skill)) continue;
       hitTarget = target;
       break;
     }
     const expired = now >= projectile.until
-      || projectile.x < 0 || projectile.x > WORLD_WIDTH
-      || projectile.y < 0 || projectile.y > WORLD_HEIGHT;
+      || projectile.x < 0 || projectile.x > map.worldWidth
+      || projectile.y < 0 || projectile.y > map.worldHeight;
     if (!hitTarget && !expired) continue;
 
     const targetIds = [];
@@ -406,7 +445,7 @@ function updateSkillProjectiles(room, now) {
     if (projectile.kind === "slow") {
       for (const target of room.players.values()) {
         if (!target.connected || target.id === projectile.sourceId || !canPlayerReceiveHit(target, now)) continue;
-        if (Math.hypot(target.x - projectile.x, target.y - projectile.y) > 72) continue;
+        if (!isTargetWithinScaledRange(target.skill, Math.hypot(target.x - projectile.x, target.y - projectile.y), 72)) continue;
         target.slowUntil = now + 3600;
         targetIds.push(target.id);
         stateChanged = true;
@@ -434,11 +473,18 @@ function findTarget(room, attacker, aim, maxDistance, minimumDot = 0.5, now = Da
     const dx = target.x - attacker.x;
     const dy = target.y - attacker.y;
     const distance = Math.hypot(dx, dy);
-    if (distance === 0 || distance > maxDistance) continue;
-    if ((dx / distance) * aim.x + (dy / distance) * aim.y < minimumDot) continue;
-    if (distance < closest) {
+    if (distance === 0 || !isTargetWithinScaledRange(target.skill, distance, maxDistance)) continue;
+    const forwardDistance = dx * aim.x + dy * aim.y;
+    const hitRadius = getSkillHitRadius(target.skill);
+    if (forwardDistance <= -hitRadius) continue;
+    const aimDot = (dx / distance) * aim.x + (dy / distance) * aim.y;
+    const lateralDistance = Math.abs(dx * aim.y - dy * aim.x);
+    if (aimDot < minimumDot && lateralDistance > hitRadius) continue;
+    const rangeExtension = hitRadius - 12;
+    const edgeDistance = Math.max(0, distance - rangeExtension);
+    if (edgeDistance < closest) {
       selected = target;
-      closest = distance;
+      closest = edgeDistance;
     }
   }
   return selected;
@@ -454,7 +500,7 @@ function findTargetOnAimLine(room, attacker, aim, maxDistance = GRAB_RANGE, hitR
     const dy = target.y - attacker.y;
     const forwardDistance = dx * aim.x + dy * aim.y;
     const lateralDistance = Math.abs(dx * aim.y - dy * aim.x);
-    if (forwardDistance <= 0 || forwardDistance > maxDistance || lateralDistance > hitRadius) continue;
+    if (!isTargetOnAimLine(target.skill, forwardDistance, lateralDistance, maxDistance, hitRadius)) continue;
     if (forwardDistance < closestForwardDistance) {
       selected = target;
       closestForwardDistance = forwardDistance;
@@ -463,17 +509,19 @@ function findTargetOnAimLine(room, attacker, aim, maxDistance = GRAB_RANGE, hitR
   return selected;
 }
 
-function clampPosition(player) {
-  player.x = Math.max(0, Math.min(WORLD_WIDTH, player.x));
-  player.y = Math.max(0, Math.min(WORLD_HEIGHT, player.y));
+function clampPosition(room, player) {
+  const map = mapForRoom(room);
+  player.x = Math.max(0, Math.min(map.worldWidth, player.x));
+  player.y = Math.max(0, Math.min(map.worldHeight, player.y));
 }
 
-function progressScore(player) {
-  return player.lap * (CHECKPOINTS.length + 1) + player.checkpoint;
+function progressScore(room, player) {
+  return player.lap * (mapForRoom(room).checkpoints.length + 1) + player.checkpoint;
 }
 
-function distanceToNextGate(player) {
-  const gate = CHECKPOINTS[player.checkpoint] ?? START_GATE;
+function distanceToNextGate(room, player) {
+  const map = mapForRoom(room);
+  const gate = map.checkpoints[player.checkpoint] ?? map.finishGate;
   return Math.hypot(player.x - (gate.x + gate.width / 2), player.y - (gate.y + gate.height / 2));
 }
 
@@ -482,9 +530,9 @@ function buildMatchResult(room, reason, now, winnerId) {
   players.sort((left, right) => {
     if (left.id === winnerId) return -1;
     if (right.id === winnerId) return 1;
-    const progressDifference = progressScore(right) - progressScore(left);
+    const progressDifference = progressScore(room, right) - progressScore(room, left);
     if (progressDifference !== 0) return progressDifference;
-    const distanceDifference = distanceToNextGate(left) - distanceToNextGate(right);
+    const distanceDifference = distanceToNextGate(room, left) - distanceToNextGate(room, right);
     if (Math.abs(distanceDifference) > 0.001) return distanceDifference;
     return left.joinOrder - right.joinOrder;
   });
@@ -512,6 +560,8 @@ function finishRoom(room, reason, now = Date.now(), winnerId) {
   room.result = buildMatchResult(room, reason, now, winnerId);
   room.clones.length = 0;
   room.projectiles.length = 0;
+  room.rocks.length = 0;
+  room.nextRockAt = 0;
   io.to(room.code).emit("match:finished", snapshot(room));
   return true;
 }
@@ -524,7 +574,10 @@ function startRoomMatch(room, now = Date.now()) {
   room.matchStartedAt = now;
   room.clones.length = 0;
   room.projectiles.length = 0;
+  resetRoomHazardLayout(room);
   resetRoomHazards(room, now);
+  resetRoomRocks(room, now);
+  resetRoomObstacles(room);
   resetPlayers(room, now);
 }
 
@@ -534,33 +587,62 @@ function startRoomCountdown(room, now = Date.now()) {
 
 function blockedByClone(room, x, y) {
   pruneClones(room);
-  return room.clones.some((clone) => Math.hypot(clone.x - x, clone.y - y) < 13);
+  return room.clones.some((clone) => runnersOverlap(x, y, clone.x, clone.y));
+}
+
+function blockedByGiantPlayer(room, player, x, y) {
+  for (const other of room.players.values()) {
+    if (!other.connected || other.id === player.id) continue;
+    if (isGiantBodyMovementBlocked(
+      player.skill,
+      player.x,
+      player.y,
+      x,
+      y,
+      other.skill,
+      other.x,
+      other.y,
+    )) return true;
+  }
+  return false;
+}
+
+function canOccupyMap(room, x, y, skill) {
+  const map = mapForRoom(room);
+  if (x - 5 < 0 || x + 5 > map.worldWidth || y - 5 < 0 || y + 7 > map.worldHeight) return false;
+  if (map.trackBoundary !== "fall" && !canStandOnMap(map, x, y)) return false;
+  const obstacles = [...map.rockBarriers, ...room.obstacles];
+  return isObstacleImmune(skill)
+    || !obstacles.some((obstacle) => runnerTouchesObstacle(x, y, obstacle));
 }
 
 function findSafePushEnd(room, target, directionX, directionY, maximumDistance = PUSH_DISTANCE) {
   for (let distance = maximumDistance; distance >= 0; distance -= 2) {
     const x = target.x + directionX * distance;
     const y = target.y + directionY * distance;
-    if (!canStandOnTrack(x, y) || blockedByClone(room, x, y)) continue;
+    if (!canOccupyMap(room, x, y, target.skill)) continue;
+    if (!isObstacleImmune(target.skill) && blockedByClone(room, x, y)) continue;
+    if (blockedByGiantPlayer(room, target, x, y)) continue;
     return { x, y };
   }
   return { x: target.x, y: target.y };
 }
 
-function findSafeAimPlacement(room, origin, aim, maximumDistance, minimumDistance = 0) {
+function findSafeAimPlacement(room, origin, aim, maximumDistance, minimumDistance = 0, skill) {
   for (let distance = maximumDistance; distance >= minimumDistance; distance -= 2) {
     const x = origin.x + aim.x * distance;
     const y = origin.y + aim.y * distance;
-    if (!canStandOnTrack(x, y) || blockedByClone(room, x, y)) continue;
+    if (!canOccupyMap(room, x, y, skill) || blockedByClone(room, x, y)) continue;
     return { x, y };
   }
   return undefined;
 }
 
 function nudgePlayerFromNewClone(room, player, clone, fallbackX, fallbackY) {
+  if (isObstacleImmune(player.skill)) return;
   const deltaX = player.x - clone.x;
   const deltaY = player.y - clone.y;
-  if (Math.abs(deltaX) >= 13 || Math.abs(deltaY) >= 14) return;
+  if (!runnersOverlap(player.x, player.y, clone.x, clone.y)) return;
   const length = Math.hypot(deltaX, deltaY);
   const baseX = length > .01 ? deltaX / length : fallbackX;
   const baseY = length > .01 ? deltaY / length : fallbackY;
@@ -570,11 +652,12 @@ function nudgePlayerFromNewClone(room, player, clone, fallbackX, fallbackY) {
     { x: baseY, y: -baseX },
     { x: -baseX, y: -baseY },
   ];
+  const map = mapForRoom(room);
   for (const direction of directions) {
     for (let distance = 20; distance <= 48; distance += 4) {
-      const x = Math.max(0, Math.min(WORLD_WIDTH, clone.x + direction.x * distance));
-      const y = Math.max(0, Math.min(WORLD_HEIGHT, clone.y + direction.y * distance));
-      if (!canStandOnTrack(x, y) || blockedByClone(room, x, y)) continue;
+      const x = Math.max(0, Math.min(map.worldWidth, clone.x + direction.x * distance));
+      const y = Math.max(0, Math.min(map.worldHeight, clone.y + direction.y * distance));
+      if (!canOccupyMap(room, x, y, player.skill) || blockedByClone(room, x, y)) continue;
       player.x = x;
       player.y = y;
       player.lastUpdateAt = Date.now();
@@ -583,8 +666,9 @@ function nudgePlayerFromNewClone(room, player, clone, fallbackX, fallbackY) {
   }
 }
 
-function respawnPlayer(player, now = Date.now()) {
-  const spawn = RESPAWN_POINTS[Math.min(player.checkpoint, RESPAWN_POINTS.length - 1)] ?? RESPAWN_POINTS[0];
+function respawnPlayer(room, player, now = Date.now()) {
+  const respawnPoints = mapForRoom(room).respawnPoints;
+  const spawn = respawnPoints[Math.min(player.checkpoint, respawnPoints.length - 1)] ?? respawnPoints[0];
   player.x = spawn.x;
   player.y = spawn.y;
   player.health = 5;
@@ -592,6 +676,7 @@ function respawnPlayer(player, now = Date.now()) {
   resetPlayerTimedStates(player);
   player.fallTargetX = spawn.x;
   player.fallTargetY = spawn.y;
+  player.fallKind = undefined;
   player.airStartX = spawn.x;
   player.airStartY = spawn.y;
   player.airEndX = spawn.x;
@@ -601,14 +686,16 @@ function respawnPlayer(player, now = Date.now()) {
   player.lastUpdateAt = now;
 }
 
-function respawnPlayerFromPit(player, now = Date.now()) {
-  const spawn = RESPAWN_POINTS[Math.min(player.checkpoint, RESPAWN_POINTS.length - 1)] ?? RESPAWN_POINTS[0];
+function respawnPlayerFromPit(room, player, now = Date.now()) {
+  const respawnPoints = mapForRoom(room).respawnPoints;
+  const spawn = respawnPoints[Math.min(player.checkpoint, respawnPoints.length - 1)] ?? respawnPoints[0];
   player.x = spawn.x;
   player.y = spawn.y;
   player.ammo = 3;
   resetPlayerTimedStates(player);
   player.fallTargetX = spawn.x;
   player.fallTargetY = spawn.y;
+  player.fallKind = undefined;
   player.airStartX = spawn.x;
   player.airStartY = spawn.y;
   player.airEndX = spawn.x;
@@ -619,28 +706,58 @@ function respawnPlayerFromPit(player, now = Date.now()) {
 }
 
 function damagePlayer(room, target, now = Date.now()) {
+  if (isDamageImmune(target.skill)) return false;
   target.health -= 1;
   const defeated = target.health <= 0;
-  if (defeated) respawnPlayer(target, now);
+  if (defeated) respawnPlayer(room, target, now);
   return defeated;
 }
 
-function playerTouchesZone(player, zone, padding = 0) {
-  const playerLeft = player.x - 5;
-  const playerTop = player.y - 5;
+function flattenPlayerFromRock(target, now = Date.now()) {
+  if (isDamageImmune(target.skill)) return false;
+  target.health -= 1;
+  enterFlattenedState(target, now + ROCK_SQUASH_DURATION);
+  target.lastUpdateAt = now;
+  return target.health <= 0;
+}
+
+function bodyTouchesZone(x, y, zone, padding = 0) {
+  const playerLeft = x - 5;
+  const playerTop = y - 5;
   return playerLeft < zone.x + zone.width - padding
     && playerLeft + 10 > zone.x + padding
     && playerTop < zone.y + zone.height - padding
     && playerTop + 12 > zone.y + padding;
 }
 
+function playerTouchesZone(player, zone, padding = 0) {
+  return bodyTouchesZone(player.x, player.y, zone, padding);
+}
+
 function triggerPitFall(room, player, pit, now) {
   enterFallingState(player, now + PIT_FALL_DURATION);
+  player.fallKind = "pit";
   player.fallTargetX = pit.x + pit.width / 2;
   player.fallTargetY = pit.y + pit.height / 2;
   player.lastUpdateAt = now;
   io.to(room.code).emit("hazard:effect", {
     kind: "pit",
+    playerId: player.id,
+    duration: PIT_FALL_DURATION,
+    targetX: player.fallTargetX,
+    targetY: player.fallTargetY,
+  });
+}
+
+function triggerVoidFall(room, player, now) {
+  enterFallingState(player, now + PIT_FALL_DURATION);
+  player.fallKind = "void";
+  const target = getTrackFallTarget(player.x, player.y);
+  player.fallTargetX = target.x;
+  player.fallTargetY = target.y;
+  player.lastUpdateAt = now;
+  io.to(room.code).emit("hazard:effect", {
+    kind: "void",
     playerId: player.id,
     duration: PIT_FALL_DURATION,
     targetX: player.fallTargetX,
@@ -710,7 +827,12 @@ function updatePlayerHazards(room, player, now) {
   const map = mapForRoom(room);
   const actionState = getPlayerActionState(player, now);
   if (actionState === "falling" || actionState === "airborne") return false;
-  const activePit = map.pitZones[room.hazards.activePitIndex];
+  if (map.trackBoundary === "fall" && !isVoidFallImmune(player.skill) && !canStandOnMap(map, player.x, player.y)) {
+    triggerVoidFall(room, player, now);
+    return true;
+  }
+  if (isGroundHazardImmune(player.skill)) return false;
+  const activePit = room.pitZones[room.hazards.activePitIndex];
   if (activePit && playerTouchesZone(player, activePit, 4)) {
     triggerPitFall(room, player, activePit, now);
     return true;
@@ -723,7 +845,7 @@ function updatePlayerHazards(room, player, now) {
     }
   }
   if (canPlayerBeDisplaced(player, now) && player.spinnerImmuneUntil <= now) {
-    const spinnerIndex = map.spinners.findIndex((spinner, index) => triggerSpinnerKnockback(room, player, spinner, index, now));
+    const spinnerIndex = room.spinners.findIndex((spinner, index) => triggerSpinnerKnockback(room, player, spinner, index, now));
     if (spinnerIndex >= 0) return true;
   }
   return false;
@@ -733,8 +855,122 @@ function resetRoomHazards(room, now = Date.now()) {
   room.hazards = createHazardState(now);
 }
 
+function resetRoomHazardLayout(room) {
+  const layout = generateMapHazards(room.config.mapId);
+  room.pitZones = layout.pitZones;
+  room.spinners = layout.spinners;
+}
+
+function resetRoomRocks(room, now = Date.now()) {
+  const config = mapForRoom(room).rollingRocks;
+  room.rocks.length = 0;
+  room.nextRockId = 0;
+  room.nextRockAt = config ? now + config.firstDelay : 0;
+}
+
+function resetRoomObstacles(room) {
+  room.obstacles = generateMapObstacles(room.config.mapId);
+}
+
+function circleTouchesRect(x, y, radius, rect) {
+  const nearestX = Math.max(rect.x, Math.min(x, rect.x + rect.width));
+  const nearestY = Math.max(rect.y, Math.min(y, rect.y + rect.height));
+  return Math.hypot(x - nearestX, y - nearestY) <= radius;
+}
+
+function spawnRollingRock(room, now) {
+  const map = mapForRoom(room);
+  const config = map.rollingRocks;
+  if (!config || map.trackPath.length < 2) return false;
+  const summit = map.trackPath[map.trackPath.length - 1];
+  const downhillTarget = map.trackPath[map.trackPath.length - 2];
+  const downhillX = downhillTarget.x - summit.x;
+  const downhillY = downhillTarget.y - summit.y;
+  const length = Math.max(1, Math.hypot(downhillX, downhillY));
+  const directionX = downhillX / length;
+  const directionY = downhillY / length;
+  const normalX = -directionY;
+  const normalY = directionX;
+  const sequence = room.nextRockId;
+  const offsets = config.spawnOffsets.length > 0 ? config.spawnOffsets : [0];
+  const offset = offsets[sequence % offsets.length];
+  const travelDuration = Math.ceil(length / Math.max(1, config.speed) * 1000) + 3000;
+  const rock = {
+    id: `${room.round}:${sequence}`,
+    x: summit.x + normalX * offset,
+    y: summit.y + normalY * offset,
+    velocityX: directionX * config.speed,
+    velocityY: directionY * config.speed,
+    radius: config.radius,
+    lastUpdateAt: now,
+    until: now + travelDuration,
+  };
+  room.nextRockId += 1;
+  room.rocks.push(rock);
+  room.nextRockAt = now + config.minDelay + Math.random() * config.randomDelay;
+  io.to(room.code).emit("hazard:rock:spawn", {
+    id: rock.id,
+    x: rock.x,
+    y: rock.y,
+    velocityX: rock.velocityX,
+    velocityY: rock.velocityY,
+    radius: rock.radius,
+    remainingMs: rock.until - now,
+  });
+  return true;
+}
+
+function updateRollingRocks(room, now) {
+  const map = mapForRoom(room);
+  const config = map.rollingRocks;
+  if (!config) {
+    if (room.rocks.length === 0) return false;
+    room.rocks.length = 0;
+    return true;
+  }
+
+  let stateChanged = false;
+  if (room.nextRockAt > 0 && now >= room.nextRockAt) spawnRollingRock(room, now);
+  for (let index = room.rocks.length - 1; index >= 0; index -= 1) {
+    const rock = room.rocks[index];
+    const elapsed = Math.max(0, Math.min(100, now - rock.lastUpdateAt)) / 1000;
+    rock.x += rock.velocityX * elapsed;
+    rock.y += rock.velocityY * elapsed;
+    rock.lastUpdateAt = now;
+
+    const barrierHit = map.rockBarriers.some((barrier) => circleTouchesRect(rock.x, rock.y, rock.radius, barrier));
+    let hitPlayer;
+    if (!barrierHit) {
+      hitPlayer = [...room.players.values()].find((candidate) => (
+        candidate.connected
+        && canPlayerReceiveHit(candidate, now)
+        && !isGroundHazardImmune(candidate.skill)
+        && Math.hypot(candidate.x - rock.x, candidate.y - rock.y) <= rock.radius + getSkillHitRadius(candidate.skill, 9)
+      ));
+    }
+    const expired = now >= rock.until
+      || rock.x < -rock.radius || rock.x > map.worldWidth + rock.radius
+      || rock.y < -rock.radius || rock.y > map.worldHeight + rock.radius;
+    if (!barrierHit && !hitPlayer && !expired) continue;
+
+    let defeated = false;
+    if (hitPlayer) {
+      defeated = flattenPlayerFromRock(hitPlayer, now);
+      stateChanged = true;
+    }
+    room.rocks.splice(index, 1);
+    io.to(room.code).emit("hazard:rock:remove", {
+      id: rock.id,
+      reason: barrierHit ? "barrier" : hitPlayer ? "player" : "expired",
+      playerId: hitPlayer?.id,
+      defeated,
+    });
+  }
+  return stateChanged;
+}
+
 function findNearestPitIndex(room) {
-  const pitZones = mapForRoom(room).pitZones;
+  const pitZones = room.pitZones;
   let selectedIndex = 0;
   let selectedDistance = Number.POSITIVE_INFINITY;
   for (let index = 0; index < pitZones.length; index += 1) {
@@ -753,6 +989,7 @@ function findNearestPitIndex(room) {
 }
 
 function updateRoomHazards(room, now) {
+  if (room.pitZones.length === 0) return false;
   if (room.hazards.warningPitIndex >= 0) {
     if (now < room.hazards.openAt) return false;
     room.hazards.activePitIndex = room.hazards.warningPitIndex;
@@ -774,24 +1011,46 @@ function updateRoomHazards(room, now) {
 
 function updateRaceProgress(room, player, now = Date.now()) {
   if (room.phase !== "running") return false;
-  const checkpoint = CHECKPOINTS[player.checkpoint];
-  if (checkpoint && playerTouchesZone(player, checkpoint, 8)) {
+  const map = mapForRoom(room);
+  const checkpoint = map.checkpoints[player.checkpoint];
+  if (checkpoint && runnerTouchesRaceZone(player.skill, player.x, player.y, checkpoint, 8)) {
     player.checkpoint += 1;
     player.ammo = 3;
-    player.skill = rollSkill(room, player.skill);
-    player.nextSkillAt = 0;
-    player.dashCharges = 3;
-    player.dashRechargeAt = 0;
+    grantNextRaceSkill(room, player);
     player.lastUpdateAt = now;
     return true;
   }
 
-  if (player.checkpoint !== CHECKPOINTS.length || !playerTouchesZone(player, START_GATE)) return false;
+  if (
+    player.checkpoint !== map.checkpoints.length
+    || !runnerTouchesRaceZone(player.skill, player.x, player.y, map.finishGate)
+  ) return false;
   player.lap += 1;
   player.checkpoint = 0;
   player.lastUpdateAt = now;
   if (player.lap >= room.config.lapLimit) {
     finishRoom(room, "completed", now, player.id);
+  } else {
+    grantNextRaceSkill(room, player);
+    if (map.courseType === "linear") {
+      player.x = map.startPoint.x;
+      player.y = map.startPoint.y;
+      player.direction = "right";
+      resetPlayerTimedStates(player);
+      player.fallTargetX = player.x;
+      player.fallTargetY = player.y;
+      player.airStartX = player.x;
+      player.airStartY = player.y;
+      player.airEndX = player.x;
+      player.airEndY = player.y;
+      player.lastUpdateAt = now;
+      io.to(room.code).emit("race:teleport", {
+        playerId: player.id,
+        x: player.x,
+        y: player.y,
+        lap: player.lap,
+      });
+    }
   }
   return true;
 }
@@ -843,6 +1102,8 @@ io.on("connection", (socket) => {
         round: 1,
         createHazardState,
       });
+      resetRoomHazardLayout(room);
+      resetRoomObstacles(room);
       rooms.set(TEST_ROOM_CODE, room);
     }
     if (!room) {
@@ -951,11 +1212,25 @@ io.on("connection", (socket) => {
     const now = Date.now();
     if (!canPlayerMove(player, now)) return;
     const elapsed = Math.max(16, now - player.lastUpdateAt);
-    if (!isMovementAllowed(player.x, player.y, x, y, elapsed, player.slowUntil > now, player.runUntil > now)) return;
-    if (blockedByClone(room, x, y)) return;
+    const skillSpeedMultiplier = getSkillSpeedMultiplier(player.skill);
+    const fixedSkillSpeed = skillSpeedMultiplier !== 1;
+    if (!isMovementAllowed(
+      player.x,
+      player.y,
+      x,
+      y,
+      elapsed,
+      player.slowUntil > now,
+      !fixedSkillSpeed && player.runUntil > now,
+      skillSpeedMultiplier,
+      mapForRoom(room),
+    )) return;
+    if (!canOccupyMap(room, x, y, player.skill)) return;
+    if (!isObstacleImmune(player.skill) && blockedByClone(room, x, y)) return;
+    if (blockedByGiantPlayer(room, player, x, y)) return;
     player.x = x;
     player.y = y;
-    clampPosition(player);
+    clampPosition(room, player);
     player.direction = ["up", "down", "left", "right"].includes(payload?.direction) ? payload.direction : player.direction;
     player.walking = Number.isFinite(Number(payload?.walking)) ? Number(payload.walking) : player.walking;
     player.lastUpdateAt = now;
@@ -989,6 +1264,7 @@ io.on("connection", (socket) => {
     const now = Date.now();
     if (!room || room.phase !== "running" || !attacker || !canPlayerAct(attacker, now) || attacker.nextSkillAt > now) return;
     const skill = attacker.skill;
+    if (isPassiveSkill(skill)) return;
     refreshDashCharges(attacker, now);
     if (skill === "dash" && attacker.dashCharges <= 0) return;
     attacker.skill = skill;
@@ -1001,7 +1277,7 @@ io.on("connection", (socket) => {
         const dx = target.x - attacker.x;
         const dy = target.y - attacker.y;
         const distance = Math.hypot(dx, dy);
-        if (!distance || distance > 72) continue;
+        if (!distance || !isTargetWithinScaledRange(target.skill, distance, 72)) continue;
         const startX = target.x;
         const startY = target.y;
         const pushEnd = findSafePushEnd(room, target, dx / distance, dy / distance);
@@ -1033,7 +1309,8 @@ io.on("connection", (socket) => {
       if (target) {
         const targetStartX = target.x;
         const targetStartY = target.y;
-        const targetEnd = findSafeAimPlacement(room, attacker, aim, 34) ?? { x: attacker.x, y: attacker.y };
+        const targetEndDistance = 34 + getSkillHitRadius(target.skill) - 12;
+        const targetEnd = findSafeAimPlacement(room, attacker, aim, targetEndDistance, 0, target.skill) ?? { x: attacker.x, y: attacker.y };
         target.x = targetEnd.x;
         target.y = targetEnd.y;
         enterDisplacementState(target, "grappled", now + 520);
@@ -1066,7 +1343,7 @@ io.on("connection", (socket) => {
       pruneClones(room);
       const ownedClones = room.clones.filter((clone) => clone.ownerId === attacker.id);
       if (ownedClones.length < CLONE_LIMIT) {
-        const spawn = findSafeAimPlacement(room, attacker, aim, 32, 8);
+        const spawn = findSafeAimPlacement(room, attacker, aim, 32, 18);
         if (!spawn) {
           attacker.nextSkillAt = now + CLONE_COOLDOWN;
           broadcastRoom(room);
@@ -1133,14 +1410,33 @@ const hazardTimer = setInterval(() => {
     }
     updateRoomHazards(room, now);
     let roomStateChanged = updateSkillProjectiles(room, now);
+    roomStateChanged = updateRollingRocks(room, now) || roomStateChanged;
     for (const player of room.players.values()) {
+      if (player.flattenedUntil > 0 && player.flattenedUntil <= now) {
+        if (player.health <= 0) respawnPlayer(room, player, now);
+        else respawnPlayerFromPit(room, player, now);
+        io.to(room.code).emit("hazard:effect", {
+          kind: "respawn",
+          reason: "rock",
+          playerId: player.id,
+          x: player.x,
+          y: player.y,
+          health: player.health,
+          ammo: player.ammo,
+        });
+        roomStateChanged = true;
+        continue;
+      }
       if (player.fallingUntil <= 0 || player.fallingUntil > now) continue;
-      respawnPlayerFromPit(player, now);
+      const fellIntoVoid = player.fallKind === "void";
+      if (fellIntoVoid) respawnPlayer(room, player, now);
+      else respawnPlayerFromPit(room, player, now);
       io.to(room.code).emit("hazard:effect", {
         kind: "respawn",
         playerId: player.id,
         x: player.x,
         y: player.y,
+        health: player.health,
         ammo: player.ammo,
       });
       roomStateChanged = true;

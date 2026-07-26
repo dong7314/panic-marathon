@@ -1,7 +1,8 @@
-export type PlayerActionState = "falling" | "airborne" | "grappled" | "pushed" | "sleeping" | "normal";
+export type PlayerActionState = "falling" | "airborne" | "flattened" | "grappled" | "pushed" | "sleeping" | "normal";
 export type PlayerTimedState = {
   fallingUntil: number;
   airUntil: number;
+  flattenedUntil: number;
   grappleUntil: number;
   pushUntil: number;
   sleepUntil: number;
@@ -18,4 +19,5 @@ export function canPlayerBeDisplaced(player: Partial<PlayerTimedState>, now?: nu
 export function resetPlayerTimedStates(player: Partial<PlayerTimedState>): void;
 export function enterFallingState(player: Partial<PlayerTimedState>, until: number): void;
 export function enterAirborneState(player: Partial<PlayerTimedState>, until: number): void;
+export function enterFlattenedState(player: Partial<PlayerTimedState>, until: number): void;
 export function enterDisplacementState(player: Partial<PlayerTimedState>, kind: "grappled" | "pushed", until: number): void;

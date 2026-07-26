@@ -1,4 +1,9 @@
-export function getMovementLimit(elapsedMs: number, slowed?: boolean, running?: boolean): number;
+export function getMovementLimit(
+  elapsedMs: number,
+  slowed?: boolean,
+  running?: boolean,
+  skillSpeedMultiplier?: number,
+): number;
 export function isMovementAllowed(
   fromX: number,
   fromY: number,
@@ -7,4 +12,7 @@ export function isMovementAllowed(
   elapsedMs: number,
   slowed?: boolean,
   running?: boolean,
+  skillSpeedMultiplier?: number,
+  mapOrAllowOffTrack?: MapDefinition | boolean,
 ): boolean;
+import type { MapDefinition } from "./map-catalog.mjs";

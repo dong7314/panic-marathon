@@ -1,5 +1,9 @@
-export type MapId = "schoolyard";
+export type MapId = "schoolyard" | "space-station" | "mountain-pass";
 export type MapTheme = MapId;
+export type TrackBoundary = "blocked" | "fall";
+export type CourseType = "loop" | "linear";
+export type MapPoint = Readonly<{ x: number; y: number }>;
+export type MapRect = Readonly<{ x: number; y: number; width: number; height: number }>;
 export type MapPalette = Readonly<{
   trackA: string;
   trackB: string;
@@ -22,10 +26,30 @@ export type MapDefinition = Readonly<{
   name: string;
   tagline: string;
   theme: MapTheme;
+  courseType: CourseType;
+  trackBoundary: TrackBoundary;
+  worldWidth: number;
+  worldHeight: number;
+  trackPath: readonly MapPoint[];
+  trackWidth: number;
+  startPoint: MapPoint;
+  spawnPoints: readonly MapPoint[];
+  respawnPoints: readonly MapPoint[];
+  checkpoints: readonly Readonly<MapRect & { spawnX: number; spawnY: number }>[];
+  finishGate: MapRect;
   palette: MapPalette;
-  pitZones: readonly Readonly<{ x: number; y: number; width: number; height: number }>[];
-  jumpPads: readonly Readonly<{ x: number; y: number; width: number; height: number; pushX: number; pushY: number }>[];
+  pitZones: readonly MapRect[];
+  jumpPads: readonly Readonly<MapRect & { pushX: number; pushY: number }>[];
   spinners: readonly Readonly<{ x: number; y: number; radius: number; speed: number }>[];
+  rockBarriers: readonly MapRect[];
+  rollingRocks: Readonly<{
+    firstDelay: number;
+    minDelay: number;
+    randomDelay: number;
+    speed: number;
+    radius: number;
+    spawnOffsets: readonly number[];
+  }> | null;
 }>;
 
 export const MAP_IDS: readonly MapId[];

@@ -1,35 +1,56 @@
 import titleKeyArt from "./assets/title-keyart-pixel-v3.png";
 import { io } from "socket.io-client";
 import {
-  CHECKPOINTS,
   CLONE_COOLDOWN,
   CLONE_DURATION,
   CLONE_LIMIT,
   DASH_RECHARGE_DURATION,
   FIRST_PIT_WARNING_DELAY,
+  FLY_VISUAL_LIFT,
   GRAB_HIT_RADIUS,
   GRAB_RANGE,
   PIT_CYCLE_MIN_DELAY,
   PIT_CYCLE_RANDOM_DELAY,
   PIT_WARNING_DURATION,
   PLAYER_BASE_SPEED,
-  RESPAWN_POINTS,
   RUN_DURATION,
   RUN_SPEED_MULTIPLIER,
+  ROCK_SQUASH_DURATION,
   SLOW_SPEED_MULTIPLIER,
-  START_GATE,
   START_POINT,
   WORLD_HEIGHT,
   WORLD_WIDTH,
+  getSkillBodyScale,
+  getSkillHitRadius,
+  getSkillRenderLayer,
+  getSkillSpeedMultiplier,
+  isDamageImmune,
+  isGroundHazardImmune,
+  isGiantBodyMovementBlocked,
+  isObstacleImmune,
+  isPassiveSkill,
+  isVoidFallImmune,
+  isTargetOnAimLine,
+  isTargetWithinScaledRange,
   pickNextSkill,
+  runnersOverlap,
+  runnerTouchesRaceZone,
+  runnerTouchesObstacle,
   type SkillId,
 } from "../shared/game-rules.mjs";
 import {
   DEFAULT_MAP_ID,
   getMapDefinition,
+  isMapId,
   type MapId,
 } from "../shared/map-catalog.mjs";
-import { insideRect, isTrackPoint, pointSegmentDistance } from "../shared/geometry.mjs";
+import {
+  generateMapHazards,
+  type GeneratedMapHazards,
+} from "../shared/map-hazards.mjs";
+import { generateMapObstacles } from "../shared/map-obstacles.mjs";
+import { canStandOnMap, getTrackFallTarget, insideRect, isMapTrackPoint, pointSegmentDistance } from "../shared/geometry.mjs";
+import type { MusicThemeId } from "../shared/music-themes.mjs";
 import { GameAudio } from "./game/audio";
 import { installInputController } from "./game/input-controller";
 import { getMapPresentation } from "./game/map-content";
@@ -53,6 +74,7 @@ import type {
   NetworkHazards,
   NetworkPlayer,
   NetworkResponse,
+  NetworkRock,
   NetworkRoom,
   NetworkSession,
   Pit,
@@ -61,6 +83,7 @@ import type {
   PropKind,
   PushEffect,
   RemotePlayer,
+  RollingRock,
   RoomConfig,
   SlowImpact,
   Spinner,
@@ -106,9 +129,15 @@ app.innerHTML = `
             <div class="title-config-grid"><label for="title-lap-count">목표 랩 <input id="title-lap-count" type="number" min="1" max="999" step="1" value="5" /></label><label for="title-player-count">인원 <input id="title-player-count" type="number" min="2" max="6" step="1" value="4" /></label></div>
             <label for="title-invite-code">초대 코드</label>
             <input id="title-invite-code" maxlength="12" value="PM-7F2A" autocomplete="off" />
+            <label for="title-map-id">맵 선택</label>
+            <select id="title-map-id">
+              <option value="schoolyard">말썽 운동장 · 안전 난간</option>
+              <option value="space-station">우주 정거장 · 트랙 이탈 시 추락</option>
+              <option value="mountain-pass">우당탕 산맥 · 직선 오르막과 낙석</option>
+            </select>
             <span class="title-skill-label">사용 스킬 <b>최소 3개</b></span>
             <div id="title-skill-pool" class="title-skill-options">
-              <label><input type="checkbox" value="push" checked /> 밀치기</label><label><input type="checkbox" value="dash" checked /> 돌진</label><label><input type="checkbox" value="run" checked /> 질주</label><label><input type="checkbox" value="grab" checked /> 그랩</label><label><input type="checkbox" value="clone" checked /> 분신</label><label><input type="checkbox" value="slow" checked /> 슬로우탄</label><label><input type="checkbox" value="sleep" checked /> 수면총</label>
+              <label><input type="checkbox" value="push" checked /> 밀치기</label><label><input type="checkbox" value="dash" checked /> 돌진</label><label><input type="checkbox" value="run" checked /> 질주</label><label><input type="checkbox" value="grab" checked /> 그랩</label><label><input type="checkbox" value="clone" checked /> 분신</label><label><input type="checkbox" value="slow" checked /> 슬로우탄</label><label><input type="checkbox" value="sleep" checked /> 수면총</label><label><input type="checkbox" value="fly" checked /> 공중부양</label><label><input type="checkbox" value="slow30" checked /> 속도 30%</label><label><input type="checkbox" value="giant" checked /> 5배 거대화</label>
             </div>
           </div>
           <div id="title-room-share" class="title-room-share hidden">
@@ -125,7 +154,7 @@ app.innerHTML = `
     <main id="game-screen" class="game-screen hidden">
       <div class="game-stage">
         <div id="game-frame" class="game-frame">
-          <canvas id="game-canvas" width="384" height="216" tabindex="0" aria-label="탑다운 픽셀 운동장"></canvas>
+          <canvas id="game-canvas" width="384" height="216" tabindex="0" aria-label="탑다운 픽셀 레이스 코스"></canvas>
           <div id="world-label-layer" class="world-label-layer" aria-hidden="true">
             <span id="player-skill-label" class="world-label player-skill-label hidden"></span>
           </div>
@@ -188,6 +217,7 @@ const elements = {
   titleRunnerName: getElement<HTMLInputElement>("#title-runner-name"),
   titleLapCount: getElement<HTMLInputElement>("#title-lap-count"),
   titlePlayerCount: getElement<HTMLInputElement>("#title-player-count"),
+  titleMapId: getElement<HTMLSelectElement>("#title-map-id"),
   titleInviteCode: getElement<HTMLInputElement>("#title-invite-code"),
   titleSkillPool: getElement<HTMLElement>("#title-skill-pool"),
   titleConfirm: getElement<HTMLButtonElement>("#title-confirm-room"),
@@ -227,11 +257,13 @@ gameContext.imageSmoothingEnabled = false;
 let currentMap = getMapDefinition(DEFAULT_MAP_ID);
 let mapPresentation = getMapPresentation(DEFAULT_MAP_ID);
 let props: WorldProp[] = mapPresentation.props.map((prop) => ({ ...prop }));
+let mapObstacles: WorldProp[] = [];
 let spinners: Spinner[] = currentMap.spinners.map((spinner) => ({ ...spinner, angle: 0 }));
 let pits: Pit[] = currentMap.pitZones.map((pit) => ({ ...pit, active: false }));
 let jumpPads = currentMap.jumpPads;
-const checkpoints = CHECKPOINTS;
-const player: Player = { x: START_POINT.x, y: START_POINT.y, direction: "right", walking: 0, name: "말썽꾸러기", color: "#f16c7a", knockbackX: 0, knockbackY: 0, hitUntil: 0, fallingUntil: 0, fallingStartedAt: 0, fallTargetX: 0, fallTargetY: 0, airUntil: 0, airStartedAt: 0, dashUntil: 0, dashVelocityX: 0, dashVelocityY: 0, health: 5, ammo: 3, shotReadyAt: 0 };
+let checkpoints = currentMap.checkpoints;
+const rollingRocks: RollingRock[] = [];
+const player: Player = { x: START_POINT.x, y: START_POINT.y, direction: "right", walking: 0, name: "말썽꾸러기", color: "#f16c7a", knockbackX: 0, knockbackY: 0, hitUntil: 0, flattenedUntil: 0, flattenedStartedAt: 0, fallingUntil: 0, fallingStartedAt: 0, fallTargetX: 0, fallTargetY: 0, airUntil: 0, airStartedAt: 0, dashUntil: 0, dashVelocityX: 0, dashVelocityY: 0, health: 5, ammo: 3, shotReadyAt: 0 };
 const PRACTICE_ARENA = { left: 180, top: 136, right: 716, bottom: 536 };
 const testBots: TestBot[] = [];
 const LOCAL_GRAPPLE_ID = "local-player";
@@ -263,17 +295,22 @@ const projectiles: Projectile[] = [];
 const grappleEffects: GrappleEffect[] = [];
 const pushEffects: PushEffect[] = [];
 const slowImpacts: SlowImpact[] = [];
-const skillReadyAt: Record<SkillId, number> = { push: 0, dash: 0, run: 0, grab: 0, clone: 0, slow: 0, sleep: 0 };
-const skillLabels: Record<SkillId, string> = { push: "밀치기", dash: "돌진", run: "질주", grab: "그랩", clone: "분신", slow: "슬로우탄", sleep: "수면총" };
+const skillReadyAt: Record<SkillId, number> = { push: 0, dash: 0, run: 0, grab: 0, clone: 0, slow: 0, sleep: 0, fly: 0, slow30: 0, giant: 0 };
+const skillLabels: Record<SkillId, string> = { push: "밀치기", dash: "돌진", run: "질주", grab: "그랩", clone: "분신", slow: "슬로우탄", sleep: "수면총", fly: "공중부양", slow30: "속도 30%", giant: "5배 거대화" };
 let dashCharges = 3;
 let dashRechargeAt = 0;
 let runUntil = 0;
 let gameMode: GameMode = "track";
 let skillTestRoomActive = false;
-let roomConfig: RoomConfig = { lapLimit: 5, playerCount: 4, mapId: DEFAULT_MAP_ID, enabledSkills: ["push", "dash", "run", "grab", "clone", "slow", "sleep"] };
+let roomConfig: RoomConfig = { lapLimit: 5, playerCount: 4, mapId: DEFAULT_MAP_ID, enabledSkills: ["push", "dash", "run", "grab", "clone", "slow", "sleep", "fly", "slow30", "giant"] };
 let equippedSkill: SkillId = "push";
 let matchFinished = false;
 const audio = new GameAudio();
+function setMusicTheme(theme: MusicThemeId) {
+  audio.setMusicTheme(theme);
+  document.documentElement.dataset.musicTheme = theme;
+}
+setMusicTheme("lobby");
 
 let gameActive = false;
 let lastFrame = performance.now();
@@ -292,14 +329,28 @@ const aim: AimState = { screenX: VIEW_WIDTH / 2, screenY: VIEW_HEIGHT / 2, world
 let skillBarSignature = "";
 let raceBoardSignature = "";
 
+function applyHazardLayout(layout: GeneratedMapHazards) {
+  spinners = layout.spinners.map((spinner) => ({ ...spinner, angle: 0 }));
+  pits = layout.pitZones.map((pit) => ({ ...pit, active: false }));
+  activePitIndex = -1;
+  warningPitIndex = -1;
+  pitOpenAt = 0;
+}
+
 function applyMapDefinition(mapId: MapId) {
   if (currentMap.id === mapId && pits.length === currentMap.pitZones.length) return;
   currentMap = getMapDefinition(mapId);
   mapPresentation = getMapPresentation(currentMap.id);
-  props = mapPresentation.props.map((prop) => ({ ...prop }));
+  mapObstacles = [];
+  props = [
+    ...mapPresentation.props.map((prop) => ({ ...prop })),
+    ...currentMap.rockBarriers.map((barrier) => ({ ...barrier, kind: "rockwall" as const, solid: true })),
+  ];
   spinners = currentMap.spinners.map((spinner) => ({ ...spinner, angle: 0 }));
   pits = currentMap.pitZones.map((pit) => ({ ...pit, active: false }));
   jumpPads = currentMap.jumpPads;
+  checkpoints = currentMap.checkpoints;
+  rollingRocks.length = 0;
   activePitIndex = -1;
   warningPitIndex = -1;
   pitOpenAt = 0;
@@ -389,6 +440,112 @@ function drawArcade(context: CanvasRenderingContext2D, x: number, y: number) {
   fillRect(context, "#3c2e49", x + 5, y + 33, 14, 4);
 }
 
+function drawRockWall(context: CanvasRenderingContext2D, x: number, y: number, width: number, height: number) {
+  const rows = Math.max(4, Math.floor(height / 15));
+  const rowHeight = Math.ceil((height - 5) / rows);
+  fillRect(context, "rgba(25,22,24,.38)", x + 5, y + height - 3, width, 9);
+
+  for (let row = 0; row < rows; row += 1) {
+    const topRow = row === 0;
+    const columns = row % 2 === 0 ? 3 : 4;
+    const sideInset = topRow ? Math.max(3, Math.floor(width * .14)) : row === 1 ? 2 : 0;
+    const availableWidth = width - sideInset * 2;
+    const rockWidth = Math.ceil(availableWidth / columns);
+    const rockY = y + 5 + row * rowHeight;
+    const rockHeight = Math.min(rowHeight + 3, y + height - rockY);
+    for (let column = 0; column < columns; column += 1) {
+      const variant = (row * 7 + column * 5 + width + height) % 4;
+      const rockX = x + sideInset + column * rockWidth - (column > 0 ? 1 : 0);
+      const actualWidth = Math.min(rockWidth + 2, x + width - rockX);
+      const crown = topRow ? variant % 3 : 0;
+      fillRect(context, "#343238", rockX + 1, rockY - crown, actualWidth - 1, rockHeight + crown);
+      fillRect(context, "#555052", rockX, rockY + 2 - crown, actualWidth, Math.max(2, rockHeight - 3 + crown));
+      fillRect(context, variant % 2 ? "#70665e" : "#665f59", rockX + 2, rockY + 1 - crown, Math.max(2, actualWidth - 4), Math.max(3, rockHeight - 6));
+      fillRect(context, "#9d8c72", rockX + 3, rockY + 2 - crown, Math.max(2, Math.floor(actualWidth * .38)), 2);
+      if (rockHeight > 9) {
+        const crackX = rockX + Math.max(4, Math.floor(actualWidth * (variant % 2 ? .62 : .45)));
+        fillRect(context, "#403d40", crackX, rockY + 6, 2, Math.max(3, rockHeight - 9));
+        fillRect(context, "#403d40", crackX - (variant % 2), rockY + rockHeight - 5, 4, 2);
+      }
+    }
+  }
+
+  fillRect(context, "#2d3031", x + 2, y + height - 5, width - 4, 5);
+  fillRect(context, "#6f7756", x + 4, y + height - 7, Math.max(5, Math.floor(width * .24)), 3);
+  fillRect(context, "#8d9365", x + 7, y + height - 8, Math.max(3, Math.floor(width * .12)), 2);
+}
+
+function drawTrafficCone(context: CanvasRenderingContext2D, x: number, y: number, width: number, height: number) {
+  fillRect(context, "rgba(42,31,45,.28)", x + 1, y + height - 1, width, 4);
+  fillRect(context, "#49354c", x, y + height - 4, width, 4);
+  fillRect(context, "#f5d06b", x + 1, y + height - 5, width - 2, 3);
+  fillRect(context, "#ed6b55", x + Math.floor(width / 2) - 2, y + 2, 5, height - 7);
+  fillRect(context, "#ff9a62", x + Math.floor(width / 2) - 1, y, 3, 4);
+  fillRect(context, "#fff0c7", x + Math.floor(width / 2) - 2, y + 6, 5, 2);
+}
+
+function drawSchoolHurdle(context: CanvasRenderingContext2D, prop: WorldProp, x: number, y: number) {
+  const vertical = prop.axis === "horizontal";
+  fillRect(context, "rgba(42,31,45,.25)", x + 2, y + prop.height - 2, prop.width, 4);
+  if (vertical) {
+    fillRect(context, "#564660", x + 3, y, 3, prop.height);
+    fillRect(context, "#564660", x + prop.width - 6, y, 3, prop.height);
+    fillRect(context, "#f5f0d8", x + 2, y + 3, prop.width - 4, 5);
+    fillRect(context, "#e65f65", x + 5, y + 4, 4, 3);
+    fillRect(context, "#e65f65", x + prop.width - 9, y + 4, 4, 3);
+  } else {
+    fillRect(context, "#564660", x, y + 3, prop.width, 3);
+    fillRect(context, "#564660", x, y + prop.height - 6, prop.width, 3);
+    fillRect(context, "#f5f0d8", x + 3, y + 2, 5, prop.height - 4);
+    fillRect(context, "#e65f65", x + 4, y + 5, 3, 4);
+    fillRect(context, "#e65f65", x + 4, y + prop.height - 9, 3, 4);
+  }
+}
+
+function drawSpaceCrate(context: CanvasRenderingContext2D, x: number, y: number, width: number, height: number) {
+  fillRect(context, "rgba(10,17,38,.35)", x + 2, y + height - 1, width, 4);
+  fillRect(context, "#202b4b", x, y, width, height);
+  fillRect(context, "#536989", x + 2, y + 2, width - 4, height - 4);
+  fillRect(context, "#263957", x + 5, y + 5, width - 10, height - 10);
+  fillRect(context, "#78e5ed", x + 3, y + 3, 3, 3);
+  fillRect(context, "#ffcf62", x + width - 6, y + height - 6, 3, 3);
+  fillRect(context, "#8fa6c6", x + Math.floor(width / 2) - 1, y + 2, 2, height - 4);
+}
+
+function drawSpacePylon(context: CanvasRenderingContext2D, prop: WorldProp, x: number, y: number) {
+  const vertical = prop.axis === "horizontal";
+  fillRect(context, "rgba(10,17,38,.35)", x + 1, y + prop.height - 1, prop.width, 4);
+  fillRect(context, "#202b4b", x, y, prop.width, prop.height);
+  fillRect(context, "#506582", x + 2, y + 2, prop.width - 4, prop.height - 4);
+  if (vertical) {
+    fillRect(context, "#ff5f9d", x + 4, y + 3, prop.width - 8, prop.height - 6);
+    fillRect(context, "#8cf5f1", x + 5, y + 5, prop.width - 10, prop.height - 10);
+  } else {
+    fillRect(context, "#ff5f9d", x + 3, y + 4, prop.width - 6, prop.height - 8);
+    fillRect(context, "#8cf5f1", x + 5, y + 5, prop.width - 10, prop.height - 10);
+  }
+  fillRect(context, "#f4f6ff", x + Math.floor(prop.width / 2) - 1, y + 4, 2, prop.height - 8);
+}
+
+function drawRollingRock(context: CanvasRenderingContext2D, rock: RollingRock, cameraX: number, cameraY: number) {
+  const x = Math.round(rock.x - cameraX);
+  const y = Math.round(rock.y - cameraY);
+  const radius = Math.round(rock.radius);
+  if (x < -radius * 2 || x > VIEW_WIDTH + radius * 2 || y < -radius * 2 || y > VIEW_HEIGHT + radius * 2) return;
+  fillRect(context, "rgba(27,22,27,.28)", x - radius, y + radius - 2, radius * 2, 5);
+  context.save();
+  context.translate(x, y);
+  context.rotate(rock.angle);
+  fillRect(context, "#343039", -radius + 2, -radius, radius * 2 - 4, radius * 2);
+  fillRect(context, "#343039", -radius, -radius + 3, radius * 2, radius * 2 - 6);
+  fillRect(context, "#655b57", -radius + 2, -radius + 2, radius * 2 - 5, radius * 2 - 5);
+  fillRect(context, "#8a7968", -radius + 5, -radius + 3, radius - 1, 5);
+  fillRect(context, "#4a4447", 1, -1, radius - 3, 4);
+  fillRect(context, "#b29a77", -radius + 4, 4, 5, 3);
+  fillRect(context, "#302e36", -2, -radius + 3, 3, 8);
+  context.restore();
+}
+
 function drawProp(context: CanvasRenderingContext2D, prop: WorldProp, cameraX: number, cameraY: number) {
   const x = Math.floor(prop.x - cameraX);
   const y = Math.floor(prop.y - cameraY);
@@ -402,6 +559,11 @@ function drawProp(context: CanvasRenderingContext2D, prop: WorldProp, cameraX: n
   if (prop.kind === "lamp") drawLamp(context, x, y);
   if (prop.kind === "mailbox") drawMailbox(context, x, y);
   if (prop.kind === "arcade") drawArcade(context, x, y);
+  if (prop.kind === "rockwall") drawRockWall(context, x, y, prop.width, prop.height);
+  if (prop.kind === "traffic-cone") drawTrafficCone(context, x, y, prop.width, prop.height);
+  if (prop.kind === "school-hurdle") drawSchoolHurdle(context, prop, x, y);
+  if (prop.kind === "space-crate") drawSpaceCrate(context, x, y, prop.width, prop.height);
+  if (prop.kind === "space-pylon") drawSpacePylon(context, prop, x, y);
 }
 
 function drawPit(context: CanvasRenderingContext2D, pit: Pit, cameraX: number, cameraY: number, time: number) {
@@ -502,6 +664,7 @@ type SkillLabelDisplay = { text: string; charging: boolean };
 
 function formatSkillLabel(skill: SkillId, status: SkillLabelStatus, now: number): SkillLabelDisplay {
   const name = skillLabels[skill].slice(0, 5);
+  if (isPassiveSkill(skill)) return { text: `${name} AUTO`, charging: false };
   const cooldown = Math.max(0, (status.cooldownUntil ?? 0) - now);
   const seconds = Math.max(1, Math.ceil(cooldown / 1000));
   if (skill === "clone") return { text: `${name} ${status.cloneCount ?? 0}/${CLONE_LIMIT}${cooldown > 0 ? ` ${seconds}s` : ""}`, charging: cooldown > 0 };
@@ -624,12 +787,96 @@ function drawSleepStatus(context: CanvasRenderingContext2D, x: number, y: number
   context.fillText("z", Math.round(x - 11), Math.round(y - 13 + drift));
 }
 
+function getFlightLift(skill: SkillId, time: number) {
+  return skill === "fly" ? FLY_VISUAL_LIFT + Math.sin(time / 180) * 2 : 0;
+}
+
+function drawFlightEffect(context: CanvasRenderingContext2D, x: number, y: number, time: number) {
+  const flap = Math.floor(time / 120) % 2;
+  fillRect(context, "rgba(38,31,54,.3)", x - 9, y + 25, 18, 3);
+  fillRect(context, "#dffcff", x - 12, y + 1 + flap, 5, 3);
+  fillRect(context, "#79dfee", x - 14, y + 3 + flap, 6, 2);
+  fillRect(context, "#dffcff", x + 7, y + 1 + flap, 5, 3);
+  fillRect(context, "#79dfee", x + 8, y + 3 + flap, 6, 2);
+}
+
+function drawSkillScaledPerson(
+  context: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  direction: Direction,
+  walking: number,
+  color: string,
+  skill: SkillId,
+  npc = false,
+  sleeping = false,
+) {
+  const scale = getSkillBodyScale(skill);
+  if (scale === 1) {
+    drawPerson(context, x, y, direction, walking, color, npc, sleeping);
+    return;
+  }
+  context.save();
+  context.translate(Math.round(x), Math.round(y));
+  context.scale(scale, scale);
+  drawPerson(context, 0, 0, direction, walking, color, npc, sleeping);
+  context.restore();
+}
+
+function getSkillStatusY(y: number, skill: SkillId) {
+  return y - (8 * getSkillBodyScale(skill) + 6);
+}
+
+function drawRockSquashedPerson(
+  context: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  direction: Direction,
+  walking: number,
+  color: string,
+  skill: SkillId,
+  startedAt: number,
+  time: number,
+  npc = false,
+) {
+  const progress = Math.max(0, Math.min(1, (time - startedAt) / ROCK_SQUASH_DURATION));
+  const compression = Math.sin(Math.min(1, progress / .32) * Math.PI / 2);
+  const scaleX = 1 + compression * .58;
+  const scaleY = 1 - compression * .73;
+  fillRect(context, "rgba(38,31,54,.34)", x - 12, y + 10, 24, 3);
+  if (progress < .55) {
+    const dustOffset = Math.round(progress * 7);
+    fillRect(context, "#cbb88f", x - 11 - dustOffset, y + 7, 3, 2);
+    fillRect(context, "#e3d0a4", x + 9 + dustOffset, y + 6, 3, 2);
+  }
+  context.save();
+  context.translate(Math.round(x), Math.round(y + compression * 9));
+  context.scale(scaleX, scaleY);
+  drawSkillScaledPerson(context, 0, 0, direction, walking, color, skill, npc);
+  context.restore();
+}
+
 function drawPlayer(context: CanvasRenderingContext2D, cameraX: number, cameraY: number, time: number) {
   const playerId = multiplayerActive ? getLocalNetworkPlayerId() : LOCAL_GRAPPLE_ID;
   const grappledPosition = getGrappledPosition(playerId, player.x, player.y, time);
   const position = getPushedPosition(playerId, grappledPosition.x, grappledPosition.y, time);
   const baseX = position.x - cameraX;
   const baseY = position.y - cameraY;
+  if (player.flattenedUntil > time) {
+    elements.playerSkillLabel.classList.add("hidden");
+    drawRockSquashedPerson(
+      context,
+      baseX,
+      baseY,
+      player.direction,
+      player.walking,
+      player.color,
+      equippedSkill,
+      player.flattenedStartedAt,
+      time,
+    );
+    return;
+  }
   if (player.fallingUntil > time) {
     elements.playerSkillLabel.classList.add("hidden");
     const progress = Math.max(0, Math.min(1, (time - player.fallingStartedAt) / 520));
@@ -645,17 +892,21 @@ function drawPlayer(context: CanvasRenderingContext2D, cameraX: number, cameraY:
   }
 
   const airProgress = player.airUntil > time ? Math.max(0, Math.min(1, (time - player.airStartedAt) / 560)) : 0;
-  const lift = airProgress > 0 ? Math.sin(airProgress * Math.PI) * 18 : 0;
+  const jumpLift = airProgress > 0 ? Math.sin(airProgress * Math.PI) * 18 : 0;
+  const flightLift = getFlightLift(equippedSkill, time);
+  const lift = Math.max(jumpLift, flightLift);
   const drawY = baseY - lift;
   const sleeping = networkSleepUntil > time;
-  if (lift > 0) fillRect(context, "rgba(38,31,54,.3)", baseX - 8, baseY + 10, 16, 3);
-  drawPerson(context, baseX, drawY, player.direction, sleeping ? time / 220 : player.walking, player.color, false, sleeping);
+  if (flightLift > 0) drawFlightEffect(context, baseX, drawY, time);
+  else if (lift > 0) fillRect(context, "rgba(38,31,54,.3)", baseX - 8, baseY + 10, 16, 3);
+  drawSkillScaledPerson(context, baseX, drawY, player.direction, player.walking, player.color, equippedSkill, false, sleeping);
   drawSlowStatus(context, baseX, drawY, time, networkSlowUntil);
   drawSleepStatus(context, baseX, drawY, time, networkSleepUntil);
   const statusLeft = Math.round(baseX - 12);
-  drawHealthPips(context, statusLeft, drawY - 14, player.health);
-  drawAmmoPips(context, statusLeft, drawY - 21, player.ammo);
-  updatePlayerSkillLabel(statusLeft, drawY - 21);
+  const statusY = getSkillStatusY(drawY, equippedSkill);
+  drawHealthPips(context, statusLeft, statusY, player.health);
+  drawAmmoPips(context, statusLeft, statusY - 7, player.ammo);
+  updatePlayerSkillLabel(statusLeft, statusY - 7);
 }
 
 function drawTitleCloud(context: CanvasRenderingContext2D, x: number, y: number) {
@@ -847,19 +1098,35 @@ function intersects(left: number, top: number, width: number, height: number, re
   return left < rect.x + rect.width - inset && left + width > rect.x + inset && top < rect.y + rect.height - inset && top + height > rect.y + inset;
 }
 
+function blockedByGiantRunner(x: number, y: number) {
+  if (!multiplayerActive) return false;
+  for (const runner of remotePlayers.values()) {
+    if (!runner.connected) continue;
+    if (isGiantBodyMovementBlocked(
+      equippedSkill,
+      player.x,
+      player.y,
+      x,
+      y,
+      runner.skill,
+      runner.targetX,
+      runner.targetY,
+    )) return true;
+  }
+  return false;
+}
+
 function canStandAt(x: number, y: number) {
   if (gameMode === "practice") {
     if (x - 5 < PRACTICE_ARENA.left || x + 5 > PRACTICE_ARENA.right || y - 5 < PRACTICE_ARENA.top || y + 7 > PRACTICE_ARENA.bottom) return false;
-    return !clones.some((clone) => Math.abs(x - clone.x) < 11 && Math.abs(y - clone.y) < 12);
+    return !clones.some((clone) => runnersOverlap(x, y, clone.x, clone.y));
   }
-  const playerLeft = x - 5;
-  const playerTop = y - 5;
-  const feet = [
-    [x - 4, y - 3], [x + 4, y - 3], [x - 4, y + 6], [x + 4, y + 6],
-  ];
-  if (!feet.every(([footX, footY]) => isTrackPoint(footX, footY))) return false;
-  return !props.some((prop) => prop.solid && intersects(playerLeft, playerTop, 10, 12, prop))
-    && !clones.some((clone) => Math.abs(x - clone.x) < 11 && Math.abs(y - clone.y) < 12);
+  if (x - 5 < 0 || x + 5 > currentMap.worldWidth || y - 5 < 0 || y + 7 > currentMap.worldHeight) return false;
+  if (currentMap.trackBoundary !== "fall" && !canStandOnMap(currentMap, x, y)) return false;
+  if (blockedByGiantRunner(x, y)) return false;
+  if (isObstacleImmune(equippedSkill)) return true;
+  return ![...props, ...mapObstacles].some((prop) => prop.solid && runnerTouchesObstacle(x, y, prop))
+    && !clones.some((clone) => runnersOverlap(x, y, clone.x, clone.y));
 }
 
 function movePlayer(dx: number, dy: number) {
@@ -889,7 +1156,7 @@ function getPracticeTargetInAim(maxDistance = GRAB_RANGE, hitRadius = GRAB_HIT_R
     const dy = bot.y - player.y;
     const forwardDistance = dx * aimVector.x + dy * aimVector.y;
     const lateralDistance = Math.abs(dx * aimVector.y - dy * aimVector.x);
-    if (forwardDistance <= 0 || forwardDistance > maxDistance || lateralDistance > hitRadius) continue;
+    if (!isTargetOnAimLine(bot.skill, forwardDistance, lateralDistance, maxDistance, hitRadius)) continue;
     if (forwardDistance < candidateForwardDistance) {
       candidate = bot;
       candidateForwardDistance = forwardDistance;
@@ -899,7 +1166,7 @@ function getPracticeTargetInAim(maxDistance = GRAB_RANGE, hitRadius = GRAB_HIT_R
 }
 
 function isLocalActionLocked(now: number) {
-  if (player.fallingUntil > 0 || player.airUntil > now) return true;
+  if (player.fallingUntil > 0 || player.flattenedUntil > 0 || player.airUntil > now) return true;
   if (grappleLockUntil > now || pushLockUntil > now) return true;
   if (multiplayerActive && (!socket.connected || networkResumeInFlight)) return true;
   return multiplayerActive && networkSleepUntil > now;
@@ -907,6 +1174,7 @@ function isLocalActionLocked(now: number) {
 
 function canUseSkill(id: SkillId, now: number) {
   if (matchFinished || isLocalActionLocked(now)) return false;
+  if (isPassiveSkill(id)) return false;
   if (id === "dash") return dashCharges > 0 && now >= skillReadyAt.dash;
   if (id === "clone") return getOwnedCloneCount() < CLONE_LIMIT && now >= skillReadyAt.clone;
   return now >= skillReadyAt[id];
@@ -915,7 +1183,7 @@ function canUseSkill(id: SkillId, now: number) {
 function applySlow(centerX: number, centerY: number, radius: number, now: number) {
   let count = 0;
   for (const bot of testBots) {
-    if (Math.hypot(bot.x - centerX, bot.y - centerY) > radius) continue;
+    if (!isTargetWithinScaledRange(bot.skill, Math.hypot(bot.x - centerX, bot.y - centerY), radius)) continue;
     bot.slowUntil = Math.max(bot.slowUntil, now + 3600);
     count += 1;
   }
@@ -966,7 +1234,7 @@ function useSkill(id: SkillId, now = performance.now()) {
       const dx = bot.x - player.x;
       const dy = bot.y - player.y;
       const distance = Math.hypot(dx, dy);
-      if (distance > 72 || distance === 0) continue;
+      if (!isTargetWithinScaledRange(bot.skill, distance, 72) || distance === 0) continue;
       bot.knockbackX = dx / distance * 300;
       bot.knockbackY = dy / distance * 300;
       count += 1;
@@ -1007,7 +1275,7 @@ function useSkill(id: SkillId, now = performance.now()) {
       if (gameMode === "practice") {
         target.x = Math.max(PRACTICE_ARENA.left + 12, Math.min(PRACTICE_ARENA.right - 12, pullX));
         target.y = Math.max(PRACTICE_ARENA.top + 12, Math.min(PRACTICE_ARENA.bottom - 12, pullY));
-      } else if (isTrackPoint(pullX, pullY)) {
+      } else if (isMapTrackPoint(currentMap, pullX, pullY)) {
         target.x = pullX;
         target.y = pullY;
       }
@@ -1050,7 +1318,7 @@ function useSkill(id: SkillId, now = performance.now()) {
     let spawnY = gameMode === "practice" ? Math.max(PRACTICE_ARENA.top + 12, Math.min(PRACTICE_ARENA.bottom - 12, rawY)) : rawY;
     if (gameMode === "track" && !canStandAt(spawnX, spawnY)) {
       let found = false;
-      for (let distance = 28; distance >= 8; distance -= 4) {
+      for (let distance = 30; distance >= 18; distance -= 2) {
         const candidateX = player.x + aimVector.x * distance;
         const candidateY = player.y + aimVector.y * distance;
         if (!canStandAt(candidateX, candidateY)) continue;
@@ -1099,7 +1367,9 @@ function useRandomSkill(now: number) {
 function rollEquippedSkill(now: number, announce = true) {
   equippedSkill = pickNextSkill(roomConfig.enabledSkills, equippedSkill);
   skillReadyAt[equippedSkill] = now;
-  if (announce) showToast(`새 스킬: ${skillLabels[equippedSkill]}! 우클릭으로 사용하세요.`);
+  if (!announce) return;
+  if (isPassiveSkill(equippedSkill)) showToast(`새 자동 스킬: ${skillLabels[equippedSkill]}! 즉시 적용됩니다.`);
+  else showToast(`새 스킬: ${skillLabels[equippedSkill]}! 우클릭으로 사용하세요.`);
 }
 
 function refillPlayerAmmo() {
@@ -1123,7 +1393,7 @@ function fireBasicShot(now: number) {
 }
 
 function respawnBot(bot: TestBot, now: number) {
-  const point = RESPAWN_POINTS[Math.min(bot.checkpoint, RESPAWN_POINTS.length - 1)];
+  const point = currentMap.respawnPoints[Math.min(bot.checkpoint, currentMap.respawnPoints.length - 1)];
   bot.x = point.x + (bot.id % 2 ? 10 : -10);
   bot.y = point.y + (bot.id % 3 - 1) * 9;
   bot.health = 5;
@@ -1133,6 +1403,7 @@ function respawnBot(bot: TestBot, now: number) {
 }
 
 function damageBot(bot: TestBot, now: number) {
+  if (isDamageImmune(bot.skill)) return;
   bot.health -= 1;
   if (bot.health <= 0) {
     respawnBot(bot, now);
@@ -1144,6 +1415,7 @@ function damageBot(bot: TestBot, now: number) {
 }
 
 function damagePlayer(now: number) {
+  if (isDamageImmune(equippedSkill)) return;
   player.health -= 1;
   if (player.health <= 0) {
     player.health = 5;
@@ -1155,18 +1427,22 @@ function damagePlayer(now: number) {
 
 function canBotStand(bot: TestBot, x: number, y: number) {
   if (gameMode === "track") {
-    const feet = [[x - 4, y - 3], [x + 4, y - 3], [x - 4, y + 6], [x + 4, y + 6]];
-    if (!feet.every(([footX, footY]) => isTrackPoint(footX, footY))) return false;
-    return !clones.some((clone) => Math.abs(x - clone.x) < 13 && Math.abs(y - clone.y) < 14);
+    if (x - 5 < 0 || x + 5 > currentMap.worldWidth || y - 5 < 0 || y + 7 > currentMap.worldHeight) return false;
+    if (currentMap.trackBoundary !== "fall" && !canStandOnMap(currentMap, x, y)) return false;
+    if (
+      !isObstacleImmune(bot.skill)
+      && [...props, ...mapObstacles].some((prop) => prop.solid && runnerTouchesObstacle(x, y, prop))
+    ) return false;
+    return !clones.some((clone) => runnersOverlap(x, y, clone.x, clone.y));
   }
   if (x - 6 < PRACTICE_ARENA.left || x + 6 > PRACTICE_ARENA.right || y - 6 < PRACTICE_ARENA.top || y + 8 > PRACTICE_ARENA.bottom) return false;
-  return !clones.some((clone) => Math.abs(x - clone.x) < 13 && Math.abs(y - clone.y) < 14);
+  return !clones.some((clone) => runnersOverlap(x, y, clone.x, clone.y));
 }
 
 function nudgeBotFromNewClone(bot: TestBot, clone: Clone, fallbackX: number, fallbackY: number) {
   const deltaX = bot.x - clone.x;
   const deltaY = bot.y - clone.y;
-  if (Math.abs(deltaX) >= 13 || Math.abs(deltaY) >= 14) return;
+  if (!runnersOverlap(bot.x, bot.y, clone.x, clone.y)) return;
   const length = Math.hypot(deltaX, deltaY);
   const directionX = length > .01 ? deltaX / length : fallbackX;
   const directionY = length > .01 ? deltaY / length : fallbackY;
@@ -1221,21 +1497,45 @@ function updatePracticeBots(now: number, dt: number) {
 function updateTrackBots(now: number, dt: number) {
   for (let index = clones.length - 1; index >= 0; index -= 1) if (clones[index].until <= now) clones.splice(index, 1);
   if (dashCharges === 0 && now >= dashRechargeAt) dashCharges = 3;
-  const route = [RESPAWN_POINTS[1], RESPAWN_POINTS[2], RESPAWN_POINTS[3], RESPAWN_POINTS[0]];
+  const route = currentMap.courseType === "linear"
+    ? [
+        ...currentMap.checkpoints.map((checkpoint) => ({ x: checkpoint.spawnX, y: checkpoint.spawnY })),
+        {
+          x: currentMap.finishGate.x + currentMap.finishGate.width / 2,
+          y: currentMap.finishGate.y + currentMap.finishGate.height / 2,
+        },
+      ]
+    : [
+        currentMap.respawnPoints[1],
+        currentMap.respawnPoints[2],
+        currentMap.respawnPoints[3],
+        currentMap.respawnPoints[0],
+      ];
   for (const bot of testBots) {
     if (bot.sleepUntil > now) continue;
+    if (currentMap.trackBoundary === "fall" && !isVoidFallImmune(bot.skill) && !canStandOnMap(currentMap, bot.x, bot.y)) {
+      respawnBot(bot, now);
+      showToast(`${bot.name} 우주 공간으로 추락!`);
+      continue;
+    }
     const target = route[bot.routeIndex];
     const dx = target.x - bot.x;
     const dy = target.y - bot.y;
     const distance = Math.hypot(dx, dy);
     const speed = bot.slowUntil > now ? 29 : 72;
     if (distance < 12) {
-      if (bot.routeIndex === 3) {
+      if (bot.routeIndex === route.length - 1) {
         bot.lap += 1;
         bot.checkpoint = 0;
         if (bot.lap >= roomConfig.lapLimit) {
           finishMatch(bot.name);
           return;
+        }
+        if (currentMap.courseType === "linear") {
+          bot.x = currentMap.startPoint.x + (bot.id % 2 ? 10 : -10);
+          bot.y = currentMap.startPoint.y + (bot.id % 3 - 1) * 9;
+          bot.knockbackX = 0;
+          bot.knockbackY = 0;
         }
       } else bot.checkpoint = bot.routeIndex + 1;
       bot.routeIndex = (bot.routeIndex + 1) % route.length;
@@ -1271,12 +1571,13 @@ function updateProjectiles(now: number, dt: number) {
     projectile.x += projectile.velocityX * dt;
     projectile.y += projectile.velocityY * dt;
     const target = projectile.owner === "player"
-      ? testBots.find((bot) => Math.hypot(bot.x - projectile.x, bot.y - projectile.y) < 11)
+      ? testBots.find((bot) => Math.hypot(bot.x - projectile.x, bot.y - projectile.y) < getSkillHitRadius(bot.skill, 11))
       : undefined;
-    const playerHit = projectile.owner === "bot" && Math.hypot(player.x - projectile.x, player.y - projectile.y) < 11;
+    const playerHit = projectile.owner === "bot"
+      && Math.hypot(player.x - projectile.x, player.y - projectile.y) < getSkillHitRadius(equippedSkill, 11);
     const outside = gameMode === "practice"
       ? projectile.x < PRACTICE_ARENA.left || projectile.x > PRACTICE_ARENA.right || projectile.y < PRACTICE_ARENA.top || projectile.y > PRACTICE_ARENA.bottom
-      : projectile.x < 0 || projectile.x > WORLD_WIDTH || projectile.y < 0 || projectile.y > WORLD_HEIGHT;
+      : projectile.x < 0 || projectile.x > currentMap.worldWidth || projectile.y < 0 || projectile.y > currentMap.worldHeight;
     const expired = now >= projectile.until || outside;
     if (projectile.visualOnly) {
       if (expired) projectiles.splice(index, 1);
@@ -1354,13 +1655,16 @@ function showNetworkResults(room: NetworkRoom) {
 }
 
 function respawnAtCheckpoint(message: string, now: number) {
-  const safeSpot = RESPAWN_POINTS[Math.min(checkpointIndex, RESPAWN_POINTS.length - 1)];
+  const safeSpot = currentMap.respawnPoints[Math.min(checkpointIndex, currentMap.respawnPoints.length - 1)];
   player.x = safeSpot.x;
   player.y = safeSpot.y;
   player.knockbackX = 0;
   player.knockbackY = 0;
   player.fallingUntil = 0;
+  player.fallKind = undefined;
   player.airUntil = 0;
+  player.flattenedUntil = 0;
+  player.flattenedStartedAt = 0;
   player.hitUntil = now + 550;
   refillPlayerAmmo();
   showToast(message);
@@ -1370,16 +1674,52 @@ function beginPitFall(pit: Pit, now: number) {
   audio.play("pit");
   player.fallingStartedAt = now;
   player.fallingUntil = now + 520;
+  player.fallKind = "pit";
   player.fallTargetX = pit.x + pit.width / 2;
   player.fallTargetY = pit.y + pit.height / 2;
   player.knockbackX = 0;
   player.knockbackY = 0;
   player.airUntil = 0;
+  player.flattenedUntil = 0;
+  player.flattenedStartedAt = 0;
   player.hitUntil = now + 600;
   showToast("구덩이에 빨려 들어간다!");
 }
 
+function beginVoidFall(now: number) {
+  audio.play("pit");
+  player.fallingStartedAt = now;
+  player.fallingUntil = now + 520;
+  player.fallKind = "void";
+  const target = getTrackFallTarget(player.x, player.y);
+  player.fallTargetX = target.x;
+  player.fallTargetY = target.y;
+  player.knockbackX = 0;
+  player.knockbackY = 0;
+  player.airUntil = 0;
+  player.flattenedUntil = 0;
+  player.flattenedStartedAt = 0;
+  player.dashUntil = 0;
+  player.hitUntil = now + 600;
+  showToast("정거장 밖으로 추락했습니다!");
+}
+
+function isPlayerStandingOnTrack() {
+  return canStandOnMap(currentMap, player.x, player.y);
+}
+
 function updateHazards(now: number, dt: number) {
+  for (let index = rollingRocks.length - 1; index >= 0; index -= 1) {
+    const rock = rollingRocks[index];
+    if (now >= rock.until) {
+      rollingRocks.splice(index, 1);
+      continue;
+    }
+    rock.x += rock.velocityX * dt;
+    rock.y += rock.velocityY * dt;
+    rock.angle += Math.hypot(rock.velocityX, rock.velocityY) * dt / Math.max(1, rock.radius);
+  }
+
   if (multiplayerActive) {
     const spinnerElapsed = (networkSpinnerElapsedAtSync + Math.max(0, now - networkSpinnerSyncedAt)) / 1000;
     for (const spinner of spinners) spinner.angle = spinner.speed * spinnerElapsed;
@@ -1387,7 +1727,19 @@ function updateHazards(now: number, dt: number) {
     for (const spinner of spinners) spinner.angle += spinner.speed * dt;
   }
 
-  if (!multiplayerActive) {
+  if (
+    !multiplayerActive
+    && gameMode === "track"
+    && currentMap.trackBoundary === "fall"
+    && player.fallingUntil <= 0
+    && !isVoidFallImmune(equippedSkill)
+    && !isPlayerStandingOnTrack()
+  ) {
+    beginVoidFall(now);
+    return;
+  }
+
+  if (!multiplayerActive && pits.length > 0) {
     if (warningPitIndex >= 0 && now >= pitOpenAt) {
       activePitIndex = warningPitIndex;
       warningPitIndex = -1;
@@ -1414,6 +1766,8 @@ function updateHazards(now: number, dt: number) {
       showToast("구덩이 경고! 잠시 후 열린다.");
     }
 
+    if (isGroundHazardImmune(equippedSkill)) return;
+
     const playerLeft = player.x - 5;
     const playerTop = player.y - 5;
     for (const pit of pits) {
@@ -1437,7 +1791,7 @@ function updateHazards(now: number, dt: number) {
     }
   }
 
-  if (multiplayerActive || now <= player.hitUntil) return;
+  if (multiplayerActive || now <= player.hitUntil || isGroundHazardImmune(equippedSkill)) return;
   for (const spinner of spinners) {
     const dx = Math.cos(spinner.angle) * spinner.radius;
     const dy = Math.sin(spinner.angle) * spinner.radius;
@@ -1455,31 +1809,47 @@ function updateHazards(now: number, dt: number) {
 }
 
 function updateProgress(now: number) {
-  if (matchFinished || player.fallingUntil > now) return;
-  const playerLeft = player.x - 5;
-  const playerTop = player.y - 5;
+  if (matchFinished || player.fallingUntil > now || player.flattenedUntil > 0) return;
   const checkpoint = checkpoints[checkpointIndex];
-  if (checkpoint && intersects(playerLeft, playerTop, 10, 12, checkpoint, 8)) {
+  if (checkpoint && runnerTouchesRaceZone(equippedSkill, player.x, player.y, checkpoint, 8)) {
     audio.play("checkpoint");
     checkpointIndex += 1;
     refillPlayerAmmo();
-    rollEquippedSkill(now);
+    rollEquippedSkill(now, false);
+    const skillNotice = ` 새 스킬: ${skillLabels[equippedSkill]}${isPassiveSkill(equippedSkill) ? " 자동 적용!" : "!"}`;
     if (checkpointIndex === checkpoints.length) {
       startArmed = true;
-      showToast("마지막 관문 통과! 시작선으로 돌아가세요.");
+      showToast(currentMap.courseType === "linear"
+        ? `마지막 체크포인트 통과! 정상까지 올라가세요.${skillNotice}`
+        : `마지막 체크포인트 통과! 출발선으로 돌아가세요.${skillNotice}`);
     } else {
-      showToast(`${checkpointIndex}번째 체크포인트 통과!`);
+      showToast(`${checkpointIndex}번째 체크포인트 통과!${skillNotice}`);
     }
     return;
   }
 
-  if (startArmed && intersects(playerLeft, playerTop, 10, 12, START_GATE)) {
+  if (startArmed && runnerTouchesRaceZone(equippedSkill, player.x, player.y, currentMap.finishGate)) {
     lap += 1;
     checkpointIndex = 0;
     startArmed = false;
     player.hitUntil = now + 300;
     if (lap >= roomConfig.lapLimit) finishMatch(player.name);
-    else showToast(`${lap}랩 완주! 다음 바퀴도 말썽을 피워보자.`);
+    else {
+      rollEquippedSkill(now, false);
+      dashCharges = 3;
+      dashRechargeAt = 0;
+      if (currentMap.courseType === "linear") {
+        player.x = currentMap.startPoint.x;
+        player.y = currentMap.startPoint.y;
+        player.direction = "right";
+        player.knockbackX = 0;
+        player.knockbackY = 0;
+      }
+      const skillNotice = ` 새 스킬: ${skillLabels[equippedSkill]}${isPassiveSkill(equippedSkill) ? " 자동 적용!" : "!"}`;
+      showToast(currentMap.courseType === "linear"
+        ? `${lap}랩 완주! 산 아래 출발점으로 순간이동했습니다.${skillNotice}`
+        : `${lap}랩 완주! 다음 바퀴도 말썽을 피워보자.${skillNotice}`);
+    }
   }
 }
 
@@ -1487,7 +1857,12 @@ function updatePlayer(dt: number, now: number) {
   if (player.fallingUntil > 0) {
     if (now < player.fallingUntil) return;
     if (multiplayerActive) return;
-    respawnAtCheckpoint("마지막 체크포인트에서 다시 달린다!", now);
+    const fellIntoVoid = player.fallKind === "void";
+    if (fellIntoVoid) player.health = 5;
+    respawnAtCheckpoint(
+      fellIntoVoid ? "우주 구조대가 마지막 체크포인트로 복귀시켰다!" : "마지막 체크포인트에서 다시 달린다!",
+      now,
+    );
     return;
   }
   if (player.airUntil > now) return;
@@ -1507,10 +1882,13 @@ function updatePlayer(dt: number, now: number) {
     vertical /= length;
     if (Math.abs(horizontal) > Math.abs(vertical)) player.direction = horizontal < 0 ? "left" : "right";
     else player.direction = vertical < 0 ? "up" : "down";
-    const runMultiplier = runUntil > now ? RUN_SPEED_MULTIPLIER : 1;
+    const skillSpeedMultiplier = getSkillSpeedMultiplier(equippedSkill);
+    const fixedSkillSpeed = skillSpeedMultiplier !== 1;
+    const runMultiplier = !fixedSkillSpeed && runUntil > now ? RUN_SPEED_MULTIPLIER : 1;
     const slowMultiplier = multiplayerActive && networkSlowUntil > now ? SLOW_SPEED_MULTIPLIER : 1;
-    movePlayer(horizontal * PLAYER_BASE_SPEED * runMultiplier * slowMultiplier * dt, vertical * PLAYER_BASE_SPEED * runMultiplier * slowMultiplier * dt);
-    player.walking += dt * 12;
+    const movementMultiplier = skillSpeedMultiplier * runMultiplier * slowMultiplier;
+    movePlayer(horizontal * PLAYER_BASE_SPEED * movementMultiplier * dt, vertical * PLAYER_BASE_SPEED * movementMultiplier * dt);
+    player.walking += dt * 12 * movementMultiplier;
   }
 
   if (Math.abs(player.knockbackX) > 2 || Math.abs(player.knockbackY) > 2) {
@@ -1530,9 +1908,11 @@ function getCamera() {
     performance.now(),
   );
   const position = getPushedPosition(playerId, grappledPosition.x, grappledPosition.y, performance.now());
+  const worldWidth = gameMode === "track" ? currentMap.worldWidth : WORLD_WIDTH;
+  const worldHeight = gameMode === "track" ? currentMap.worldHeight : WORLD_HEIGHT;
   return {
-    x: Math.max(0, Math.min(WORLD_WIDTH - VIEW_WIDTH, position.x - VIEW_WIDTH / 2)),
-    y: Math.max(0, Math.min(WORLD_HEIGHT - VIEW_HEIGHT, position.y - VIEW_HEIGHT / 2)),
+    x: Math.max(0, Math.min(worldWidth - VIEW_WIDTH, position.x - VIEW_WIDTH / 2)),
+    y: Math.max(0, Math.min(worldHeight - VIEW_HEIGHT, position.y - VIEW_HEIGHT / 2)),
   };
 }
 
@@ -1610,12 +1990,16 @@ function drawPracticeFloor(context: CanvasRenderingContext2D, cameraX: number, c
 function drawTestBot(context: CanvasRenderingContext2D, bot: TestBot, cameraX: number, cameraY: number, time: number) {
   const position = getGrappledPosition(bot.id, bot.x, bot.y, time);
   const x = position.x - cameraX;
-  const y = position.y - cameraY;
+  const baseY = position.y - cameraY;
+  const flightLift = getFlightLift(bot.skill, time);
+  const y = baseY - flightLift;
   const sleeping = bot.sleepUntil > time;
-  drawPerson(context, x, y, bot.direction, sleeping ? time / 220 : bot.walking, bot.color, true, sleeping);
+  if (flightLift > 0) drawFlightEffect(context, x, y, time);
+  drawSkillScaledPerson(context, x, y, bot.direction, bot.walking, bot.color, bot.skill, true, sleeping);
   const statusLeft = Math.round(x - 12);
-  drawHealthPips(context, statusLeft, y - 14, bot.health);
-  updateRunnerLabels(bot, statusLeft, y - 14);
+  const statusY = getSkillStatusY(y, bot.skill);
+  drawHealthPips(context, statusLeft, statusY, bot.health);
+  updateRunnerLabels(bot, statusLeft, statusY);
   drawSlowStatus(context, x, y, time, bot.slowUntil);
   drawSleepStatus(context, x, y, time, bot.sleepUntil);
 }
@@ -1629,6 +2013,22 @@ function drawRemotePlayer(context: CanvasRenderingContext2D, runner: RemotePlaye
   const position = getPushedPosition(runner.id, grappledPosition.x, grappledPosition.y, time);
   const baseX = position.x - cameraX;
   const baseY = position.y - cameraY;
+  if (runner.flattenedUntil > time) {
+    removeRunnerLabels(runner.id);
+    drawRockSquashedPerson(
+      context,
+      baseX,
+      baseY,
+      runner.direction,
+      runner.walking,
+      runner.color,
+      runner.skill,
+      runner.flattenedStartedAt,
+      time,
+      true,
+    );
+    return;
+  }
   if (runner.fallingUntil > time) {
     const progress = Math.max(0, Math.min(1, (time - runner.fallingStartedAt) / 520));
     const drawX = baseX + (runner.fallTargetX - runner.x) * progress;
@@ -1642,17 +2042,21 @@ function drawRemotePlayer(context: CanvasRenderingContext2D, runner: RemotePlaye
     return;
   }
   const airProgress = runner.airUntil > time ? Math.max(0, Math.min(1, (time - runner.airStartedAt) / 560)) : 0;
-  const lift = airProgress > 0 ? Math.sin(airProgress * Math.PI) * 18 : 0;
+  const jumpLift = airProgress > 0 ? Math.sin(airProgress * Math.PI) * 18 : 0;
+  const flightLift = getFlightLift(runner.skill, time);
+  const lift = Math.max(jumpLift, flightLift);
   const x = baseX;
   const y = baseY - lift;
   const sleeping = runner.sleepEffectUntil > time;
-  if (lift > 0) fillRect(context, "rgba(38,31,54,.3)", baseX - 8, baseY + 10, 16, 3);
-  drawPerson(context, x, y, runner.direction, sleeping ? time / 220 : runner.walking, runner.color, true, sleeping);
+  if (flightLift > 0) drawFlightEffect(context, x, y, time);
+  else if (lift > 0) fillRect(context, "rgba(38,31,54,.3)", baseX - 8, baseY + 10, 16, 3);
+  drawSkillScaledPerson(context, x, y, runner.direction, runner.walking, runner.color, runner.skill, true, sleeping);
   drawSlowStatus(context, x, y, time, runner.slowEffectUntil);
   drawSleepStatus(context, x, y, time, runner.sleepEffectUntil);
   const statusLeft = Math.round(x - 12);
-  drawHealthPips(context, statusLeft, y - 14, runner.health);
-  updateRunnerLabels(runner, statusLeft, y - 14);
+  const statusY = getSkillStatusY(y, runner.skill);
+  drawHealthPips(context, statusLeft, statusY, runner.health);
+  updateRunnerLabels(runner, statusLeft, statusY);
 }
 
 function drawGrappleEffects(context: CanvasRenderingContext2D, cameraX: number, cameraY: number, now: number) {
@@ -1768,10 +2172,11 @@ function updateRaceBoard() {
     return;
   }
   elements.raceBoard.classList.remove("hidden");
-  const playerCheckpoint = lap >= roomConfig.lapLimit ? "FIN" : checkpointIndex < checkpoints.length ? `CP${checkpointIndex + 1}` : "START";
+  const finishLabel = currentMap.courseType === "linear" ? "TOP" : "START";
+  const playerCheckpoint = lap >= roomConfig.lapLimit ? "FIN" : checkpointIndex < checkpoints.length ? `CP${checkpointIndex + 1}` : finishLabel;
   const otherRunners = multiplayerActive
-    ? [...remotePlayers.values()].map((runner) => ({ id: runner.id, name: runner.connected ? runner.name : `${runner.name} · 재접속`, color: runner.color, lap: runner.lap, checkpoint: runner.checkpoint, label: runner.lap >= roomConfig.lapLimit ? "FIN" : runner.checkpoint < 3 ? `CP${runner.checkpoint + 1}` : "START", me: false }))
-    : testBots.map((bot) => ({ id: bot.id, name: bot.name, color: bot.color, lap: bot.lap, checkpoint: bot.checkpoint, label: bot.routeIndex < 3 ? `CP${bot.routeIndex + 1}` : "START", me: false }));
+    ? [...remotePlayers.values()].map((runner) => ({ id: runner.id, name: runner.connected ? runner.name : `${runner.name} · 재접속`, color: runner.color, lap: runner.lap, checkpoint: runner.checkpoint, label: runner.lap >= roomConfig.lapLimit ? "FIN" : runner.checkpoint < checkpoints.length ? `CP${runner.checkpoint + 1}` : finishLabel, me: false }))
+    : testBots.map((bot) => ({ id: bot.id, name: bot.name, color: bot.color, lap: bot.lap, checkpoint: bot.checkpoint, label: bot.routeIndex < checkpoints.length ? `CP${bot.routeIndex + 1}` : finishLabel, me: false }));
   const runners = [
     { id: 0, name: player.name, color: player.color, lap, checkpoint: checkpointIndex, label: playerCheckpoint, me: true },
     ...otherRunners,
@@ -1822,31 +2227,42 @@ function drawTown(context: CanvasRenderingContext2D, time: number) {
   for (const pit of pits) drawPit(context, pit, cameraX, cameraY, time);
   for (const pad of jumpPads) drawJumpPad(context, pad, cameraX, cameraY);
   checkpoints.forEach((checkpoint, index) => drawCheckpoint(context, checkpoint, cameraX, cameraY, checkpointIndex === index, `${index + 1}`));
+  for (const spinner of spinners) drawSpinner(context, spinner, cameraX, cameraY);
+  for (const rock of rollingRocks) drawRollingRock(context, rock, cameraX, cameraY);
 
-  const draws = [...props].sort((a, b) => a.y + a.height - (b.y + b.height));
+  const draws = [...props, ...mapObstacles].sort((a, b) => a.y + a.height - (b.y + b.height));
+  const playerRenderLayer = getSkillRenderLayer(equippedSkill);
   let playerDrawn = false;
   for (const prop of draws) {
-    if (!playerDrawn && player.y + 12 < prop.y + prop.height) {
+    if (playerRenderLayer === 0 && !playerDrawn && player.y + 12 < prop.y + prop.height) {
       drawPlayer(context, cameraX, cameraY, time);
       playerDrawn = true;
     }
     drawProp(context, prop, cameraX, cameraY);
   }
-  if (!playerDrawn) drawPlayer(context, cameraX, cameraY, time);
+  if (playerRenderLayer === 0 && !playerDrawn) drawPlayer(context, cameraX, cameraY, time);
 
-  for (const bot of testBots) drawTestBot(context, bot, cameraX, cameraY, time);
-  for (const runner of remotePlayers.values()) drawRemotePlayer(context, runner, cameraX, cameraY, time);
+  for (const bot of testBots) {
+    if (getSkillRenderLayer(bot.skill) === 0) drawTestBot(context, bot, cameraX, cameraY, time);
+  }
+  for (const runner of remotePlayers.values()) {
+    if (getSkillRenderLayer(runner.skill) === 0) drawRemotePlayer(context, runner, cameraX, cameraY, time);
+  }
   for (const clone of clones) drawClone(context, clone, cameraX, cameraY, time);
   for (const projectile of projectiles) drawProjectile(context, projectile, cameraX, cameraY);
   drawSlowImpacts(context, cameraX, cameraY, time);
   drawGrappleEffects(context, cameraX, cameraY, time);
 
-  for (const spinner of spinners) drawSpinner(context, spinner, cameraX, cameraY);
-  drawAimGuide(context, cameraX, cameraY, time);
-
-  for (const npc of mapPresentation.npcs) {
-    drawPerson(context, npc.x - cameraX, npc.y - cameraY, "down", time / 330 + npc.x, npc.color, true);
+  for (const renderLayer of [1, 2] as const) {
+    if (playerRenderLayer === renderLayer) drawPlayer(context, cameraX, cameraY, time);
+    for (const bot of testBots) {
+      if (getSkillRenderLayer(bot.skill) === renderLayer) drawTestBot(context, bot, cameraX, cameraY, time);
+    }
+    for (const runner of remotePlayers.values()) {
+      if (getSkillRenderLayer(runner.skill) === renderLayer) drawRemotePlayer(context, runner, cameraX, cameraY, time);
+    }
   }
+  drawAimGuide(context, cameraX, cameraY, time);
 
   fillRect(context, "rgba(34,26,57,.22)", 0, 0, VIEW_WIDTH, 3);
   fillRect(context, "rgba(34,26,57,.22)", 0, VIEW_HEIGHT - 3, VIEW_WIDTH, 3);
@@ -1911,6 +2327,13 @@ function syncNetworkHazards(hazards: NetworkHazards) {
   });
 }
 
+function syncNetworkHazardLayout(room: NetworkRoom) {
+  applyHazardLayout({
+    pitZones: room.pitZones ?? [],
+    spinners: room.spinners ?? [],
+  });
+}
+
 function syncRemotePlayers(room: NetworkRoom) {
   const present = new Set<string>();
   const playerId = getLocalNetworkPlayerId();
@@ -1927,15 +2350,25 @@ function syncRemotePlayers(room: NetworkRoom) {
 }
 
 function syncRemoteHazardState(current: RemotePlayer, runner: NetworkPlayer, receivedAt: number) {
+  const flattenedMs = Math.max(0, runner.flattenedMs ?? 0);
+  if (flattenedMs > 0) {
+    current.flattenedStartedAt = receivedAt - Math.max(0, runner.flattenedElapsedMs ?? 0);
+    current.flattenedUntil = receivedAt + flattenedMs;
+  } else {
+    current.flattenedStartedAt = 0;
+    current.flattenedUntil = 0;
+  }
   const fallingMs = Math.max(0, runner.fallingMs ?? 0);
   if (fallingMs > 0) {
     current.fallingStartedAt = receivedAt - Math.max(0, runner.fallingElapsedMs ?? 0);
     current.fallingUntil = receivedAt + fallingMs;
     current.fallTargetX = runner.fallTargetX ?? runner.x;
     current.fallTargetY = runner.fallTargetY ?? runner.y;
+    current.fallKind = runner.fallKind;
   } else {
     current.fallingStartedAt = 0;
     current.fallingUntil = 0;
+    current.fallKind = undefined;
   }
   const airMs = Math.max(0, runner.airMs ?? 0);
   if (airMs > 0) {
@@ -1961,17 +2394,31 @@ function syncPlayerTimedState(runner: NetworkPlayer, receivedAt: number) {
 }
 
 function syncPlayerHazardState(runner: NetworkPlayer, receivedAt: number) {
+  const flattenedMs = Math.max(0, runner.flattenedMs ?? 0);
+  if (flattenedMs > 0) {
+    player.flattenedStartedAt = receivedAt - Math.max(0, runner.flattenedElapsedMs ?? 0);
+    player.flattenedUntil = receivedAt + flattenedMs;
+    player.knockbackX = 0;
+    player.knockbackY = 0;
+    player.airUntil = 0;
+    player.dashUntil = 0;
+  } else {
+    player.flattenedStartedAt = 0;
+    player.flattenedUntil = 0;
+  }
   const fallingMs = Math.max(0, runner.fallingMs ?? 0);
   if (fallingMs > 0) {
     player.fallingStartedAt = receivedAt - Math.max(0, runner.fallingElapsedMs ?? 0);
     player.fallingUntil = receivedAt + fallingMs;
     player.fallTargetX = runner.fallTargetX ?? runner.x;
     player.fallTargetY = runner.fallTargetY ?? runner.y;
+    player.fallKind = runner.fallKind;
     player.knockbackX = 0;
     player.knockbackY = 0;
     player.airUntil = 0;
   } else {
     player.fallingUntil = 0;
+    player.fallKind = undefined;
   }
   const airMs = Math.max(0, runner.airMs ?? 0);
   if (airMs > 0 && fallingMs === 0) {
@@ -1992,6 +2439,46 @@ function syncNetworkClones(room: NetworkRoom) {
   }
 }
 
+function upsertNetworkRock(networkRock: NetworkRock) {
+  const receivedAt = performance.now();
+  const current = rollingRocks.find((rock) => rock.id === networkRock.id);
+  if (current) {
+    current.x = networkRock.x;
+    current.y = networkRock.y;
+    current.velocityX = networkRock.velocityX;
+    current.velocityY = networkRock.velocityY;
+    current.radius = networkRock.radius;
+    current.until = receivedAt + Math.max(0, networkRock.remainingMs);
+    return;
+  }
+  rollingRocks.push({
+    id: networkRock.id,
+    x: networkRock.x,
+    y: networkRock.y,
+    velocityX: networkRock.velocityX,
+    velocityY: networkRock.velocityY,
+    radius: networkRock.radius,
+    until: receivedAt + Math.max(0, networkRock.remainingMs),
+    angle: 0,
+  });
+}
+
+function syncNetworkRocks(room: NetworkRoom) {
+  if (!multiplayerActive) return;
+  const present = new Set((room.rocks ?? []).map((rock) => rock.id));
+  for (let index = rollingRocks.length - 1; index >= 0; index -= 1) {
+    if (!present.has(rollingRocks[index].id)) rollingRocks.splice(index, 1);
+  }
+  for (const rock of room.rocks ?? []) upsertNetworkRock(rock);
+}
+
+function syncNetworkObstacles(room: NetworkRoom) {
+  mapObstacles = (room.obstacles ?? []).map((obstacle) => ({
+    ...obstacle,
+    solid: true,
+  }));
+}
+
 function upsertRemotePlayer(runner: NetworkPlayer) {
   const receivedAt = performance.now();
   const current = remotePlayers.get(runner.id);
@@ -2009,6 +2496,8 @@ function upsertRemotePlayer(runner: NetworkPlayer) {
       fallTargetY: runner.fallTargetY ?? runner.y,
       airStartedAt: 0,
       airUntil: 0,
+      flattenedStartedAt: 0,
+      flattenedUntil: 0,
       slowEffectUntil: 0,
       sleepEffectUntil: 0,
     };
@@ -2110,13 +2599,17 @@ function applyNetworkRoom(room: NetworkRoom) {
   syncNetworkCountdown(room);
   roomConfig = room.config;
   applyMapDefinition(room.config.mapId);
+  syncNetworkObstacles(room);
+  syncNetworkHazardLayout(room);
   syncNetworkHazards(room.hazards);
   syncRemotePlayers(room);
   syncNetworkClones(room);
+  syncNetworkRocks(room);
   const self = room.players.find((runner) => runner.id === getLocalNetworkPlayerId());
   if (self && multiplayerActive && gameActive) {
     const previousLap = lap;
     const previousCheckpoint = checkpointIndex;
+    const previousSkill = equippedSkill;
     const receivedAt = performance.now();
     syncPlayerTimedState(self, receivedAt);
     syncPlayerHazardState(self, receivedAt);
@@ -2133,10 +2626,19 @@ function applyNetworkRoom(room: NetworkRoom) {
       player.x = self.x;
       player.y = self.y;
     }
+    const skillNotice = previousSkill !== self.skill
+      ? ` 새 스킬: ${skillLabels[self.skill]}${isPassiveSkill(self.skill) ? " 자동 적용!" : "!"}`
+      : "";
     if (room.phase === "running" && lap > previousLap) {
-      showToast(`${lap}랩 완주! 다음 바퀴도 말썽을 피워보자.`);
+      showToast(currentMap.courseType === "linear"
+        ? `${lap}랩 완주! 산 아래 출발점으로 순간이동했습니다.${skillNotice}`
+        : `${lap}랩 완주! 다음 바퀴도 말썽을 피워보자.${skillNotice}`);
     } else if (room.phase === "running" && checkpointIndex > previousCheckpoint) {
-      showToast(checkpointIndex === checkpoints.length ? "마지막 관문 통과! 시작선으로 돌아가세요." : `${checkpointIndex}번째 체크포인트 통과!`);
+      showToast(checkpointIndex === checkpoints.length
+        ? currentMap.courseType === "linear"
+          ? `마지막 체크포인트 통과! 정상까지 올라가세요.${skillNotice}`
+          : `마지막 체크포인트 통과! 출발선으로 돌아가세요.${skillNotice}`
+        : `${checkpointIndex}번째 체크포인트 통과!${skillNotice}`);
     }
   }
   if (multiplayerActive && gameActive && room.phase === "finished" && room.winner && room.result) {
@@ -2199,6 +2701,7 @@ function restoreNetworkRoom(room: NetworkRoom) {
     showToast(`${room.code} 방의 경기 상태를 복구했습니다.`);
     return;
   }
+  setMusicTheme("lobby");
   multiplayerActive = false;
   gameActive = false;
   elements.game.classList.add("hidden");
@@ -2250,7 +2753,9 @@ function sendLocalNetworkState(now: number) {
 function readRoomConfig(): RoomConfig | undefined {
   const lapLimit = Math.floor(Number(elements.titleLapCount.value));
   const playerCount = Math.floor(Number(elements.titlePlayerCount.value));
-  const mapId = DEFAULT_MAP_ID;
+  const mapId = isMapId(elements.titleMapId.value)
+    ? elements.titleMapId.value
+    : DEFAULT_MAP_ID;
   const enabledSkills = [...elements.titleSkillPool.querySelectorAll<HTMLInputElement>('input[type="checkbox"]:checked')]
     .map((input) => input.value as SkillId)
     .filter((id): id is SkillId => Object.hasOwn(skillLabels, id));
@@ -2284,18 +2789,26 @@ function startLocalGame(name: string) {
   const now = performance.now();
   roomConfig = config;
   applyMapDefinition(config.mapId);
+  setMusicTheme(config.mapId);
+  mapObstacles = generateMapObstacles(config.mapId).map((obstacle) => ({
+    ...obstacle,
+    solid: true,
+  }));
+  applyHazardLayout(generateMapHazards(config.mapId));
   gameMode = "track";
   resetWorldLabels();
   matchFinished = false;
   player.name = name;
   player.color = "#f16c7a";
-  player.x = START_POINT.x;
-  player.y = START_POINT.y;
+  player.x = currentMap.startPoint.x;
+  player.y = currentMap.startPoint.y;
   player.direction = "right";
   player.walking = 0;
   player.knockbackX = 0;
   player.knockbackY = 0;
   player.hitUntil = 0;
+  player.flattenedUntil = 0;
+  player.flattenedStartedAt = 0;
   player.fallingUntil = 0;
   player.fallingStartedAt = 0;
   player.airUntil = 0;
@@ -2335,7 +2848,8 @@ function startLocalGame(name: string) {
   elements.game.classList.remove("hidden");
   gameActive = true;
   elements.gameCanvas.focus();
-  showToast(`${name}, ${currentMap.name} ${roomConfig.playerCount}인 ${roomConfig.lapLimit}랩 레이스 시작!`);
+  const passiveNotice = isPassiveSkill(equippedSkill) ? ` ${skillLabels[equippedSkill]} 자동 적용!` : "";
+  showToast(`${name}, ${currentMap.name} ${roomConfig.playerCount}인 ${roomConfig.lapLimit}랩 레이스 시작!${passiveNotice}`);
 }
 
 function startNetworkMatch(room: NetworkRoom) {
@@ -2357,6 +2871,9 @@ function startNetworkMatch(room: NetworkRoom) {
   pushEffects.length = 0;
   roomConfig = room.config;
   applyMapDefinition(room.config.mapId);
+  setMusicTheme(room.config.mapId);
+  syncNetworkObstacles(room);
+  syncNetworkHazardLayout(room);
   syncRemotePlayers(room);
   const now = performance.now();
   gameMode = "track";
@@ -2372,6 +2889,8 @@ function startNetworkMatch(room: NetworkRoom) {
   player.knockbackX = 0;
   player.knockbackY = 0;
   player.hitUntil = 0;
+  player.flattenedUntil = 0;
+  player.flattenedStartedAt = 0;
   player.fallingUntil = 0;
   player.fallingStartedAt = 0;
   player.airUntil = 0;
@@ -2387,6 +2906,7 @@ function startNetworkMatch(room: NetworkRoom) {
   testBots.length = 0;
   clones.length = 0;
   syncNetworkClones(room);
+  syncNetworkRocks(room);
   projectiles.length = 0;
   slowImpacts.length = 0;
   (Object.keys(skillReadyAt) as SkillId[]).forEach((id) => { skillReadyAt[id] = 0; });
@@ -2409,7 +2929,8 @@ function startNetworkMatch(room: NetworkRoom) {
   elements.game.classList.remove("hidden");
   gameActive = true;
   elements.gameCanvas.focus();
-  showToast(`${room.code} 멀티 레이스 시작! ${room.players.length}명 연결됨.`);
+  const passiveNotice = isPassiveSkill(equippedSkill) ? ` ${skillLabels[equippedSkill]} 자동 적용!` : "";
+  showToast(`${room.code} 멀티 레이스 시작! ${room.players.length}명 연결됨.${passiveNotice}`);
 }
 
 function resetSkillPractice(now: number) {
@@ -2447,6 +2968,7 @@ function resetSkillPractice(now: number) {
     }));
   }
   (Object.keys(skillReadyAt) as SkillId[]).forEach((id) => { skillReadyAt[id] = 0; });
+  equippedSkill = "push";
   dashCharges = 3;
   dashRechargeAt = 0;
   runUntil = 0;
@@ -2454,6 +2976,7 @@ function resetSkillPractice(now: number) {
 }
 
 function enterPractice() {
+  setMusicTheme("lobby");
   gameMode = "practice";
   const now = performance.now();
   player.x = 448;
@@ -2463,6 +2986,8 @@ function enterPractice() {
   player.knockbackX = 0;
   player.knockbackY = 0;
   player.hitUntil = 0;
+  player.flattenedUntil = 0;
+  player.flattenedStartedAt = 0;
   player.fallingUntil = 0;
   player.airUntil = 0;
   player.dashUntil = 0;
@@ -2472,6 +2997,7 @@ function enterPractice() {
 }
 
 function returnToTitle() {
+  setMusicTheme("lobby");
   if (activeNetworkRoom) socket.emit("room:leave");
   clearNetworkSession();
   activeNetworkRoom = undefined;
@@ -2688,17 +3214,20 @@ function applyNetworkHazardEffect(effect: HazardEffect) {
   const now = performance.now();
   const isSelf = effect.playerId === getLocalNetworkPlayerId();
   const remote = remotePlayers.get(effect.playerId);
-  if (effect.kind === "pit") {
+  if (effect.kind === "pit" || effect.kind === "void") {
     clearNetworkControlEffects(effect.playerId);
     if (isSelf) {
       audio.play("pit");
       player.fallingStartedAt = now;
       player.fallingUntil = now + effect.duration;
+      player.fallKind = effect.kind;
       player.fallTargetX = effect.targetX;
       player.fallTargetY = effect.targetY;
       player.knockbackX = 0;
       player.knockbackY = 0;
       player.airUntil = 0;
+      player.flattenedUntil = 0;
+      player.flattenedStartedAt = 0;
       player.dashUntil = 0;
       networkSleepUntil = 0;
       networkSlowUntil = 0;
@@ -2706,14 +3235,17 @@ function applyNetworkHazardEffect(effect: HazardEffect) {
       grappleLockUntil = 0;
       pushLockUntil = 0;
       player.hitUntil = now + effect.duration;
-      showToast("구덩이에 빨려 들어간다!");
+      showToast(effect.kind === "void" ? "정거장 밖으로 추락했습니다!" : "구덩이에 빨려 들어간다!");
     }
     if (remote) {
       remote.fallingStartedAt = now;
       remote.fallingUntil = now + effect.duration;
+      remote.fallKind = effect.kind;
       remote.fallTargetX = effect.targetX;
       remote.fallTargetY = effect.targetY;
       remote.airUntil = 0;
+      remote.flattenedUntil = 0;
+      remote.flattenedStartedAt = 0;
       remote.sleepEffectUntil = 0;
       remote.slowEffectUntil = 0;
     }
@@ -2740,6 +3272,8 @@ function applyNetworkHazardEffect(effect: HazardEffect) {
       player.knockbackY = 0;
       player.airStartedAt = now;
       player.airUntil = now + effect.duration;
+      player.flattenedUntil = 0;
+      player.flattenedStartedAt = 0;
       networkSleepUntil = 0;
       grappleLockUntil = 0;
       pushLockUntil = 0;
@@ -2753,6 +3287,8 @@ function applyNetworkHazardEffect(effect: HazardEffect) {
       remote.targetY = effect.endY;
       remote.airStartedAt = now;
       remote.airUntil = now + effect.duration;
+      remote.flattenedUntil = 0;
+      remote.flattenedStartedAt = 0;
       remote.sleepEffectUntil = 0;
     }
     return;
@@ -2761,9 +3297,13 @@ function applyNetworkHazardEffect(effect: HazardEffect) {
   if (isSelf) {
     player.x = effect.x;
     player.y = effect.y;
+    player.health = effect.health;
     player.ammo = effect.ammo;
     player.fallingUntil = 0;
+    player.fallKind = undefined;
     player.airUntil = 0;
+    player.flattenedUntil = 0;
+    player.flattenedStartedAt = 0;
     player.knockbackX = 0;
     player.knockbackY = 0;
     player.dashUntil = 0;
@@ -2773,15 +3313,21 @@ function applyNetworkHazardEffect(effect: HazardEffect) {
     grappleLockUntil = 0;
     pushLockUntil = 0;
     player.hitUntil = now + 550;
-    showToast("마지막 체크포인트에서 다시 달린다!");
+    showToast(effect.reason === "rock"
+      ? "낙석에 납작해진 뒤 마지막 체크포인트로 복귀했습니다!"
+      : "마지막 체크포인트에서 다시 달린다!");
   }
   if (remote) {
     remote.x = effect.x;
     remote.y = effect.y;
     remote.targetX = effect.x;
     remote.targetY = effect.y;
+    remote.health = effect.health;
     remote.fallingUntil = 0;
+    remote.fallKind = undefined;
     remote.airUntil = 0;
+    remote.flattenedUntil = 0;
+    remote.flattenedStartedAt = 0;
     remote.sleepEffectUntil = 0;
     remote.slowEffectUntil = 0;
   }
@@ -2840,6 +3386,33 @@ socket.on("hazard:state", (hazards: NetworkHazards) => {
   }
 });
 socket.on("hazard:effect", (effect: HazardEffect) => applyNetworkHazardEffect(effect));
+socket.on("hazard:rock:spawn", (rock: NetworkRock) => {
+  if (!multiplayerActive) return;
+  upsertNetworkRock(rock);
+});
+socket.on("hazard:rock:remove", (event: { id: string; reason: "barrier" | "player" | "expired"; playerId?: string; defeated?: boolean }) => {
+  const index = rollingRocks.findIndex((rock) => rock.id === event.id);
+  if (index >= 0) rollingRocks.splice(index, 1);
+  if (event.playerId !== getLocalNetworkPlayerId()) return;
+  audio.play("hit");
+  showToast(event.defeated ? "낙석에 완전히 깔렸습니다!" : "낙석에 맞아 납작해졌습니다!");
+});
+socket.on("race:teleport", (event: { playerId: string; x: number; y: number; lap: number }) => {
+  if (!multiplayerActive) return;
+  if (event.playerId === getLocalNetworkPlayerId()) {
+    player.x = event.x;
+    player.y = event.y;
+    player.knockbackX = 0;
+    player.knockbackY = 0;
+    return;
+  }
+  const runner = remotePlayers.get(event.playerId);
+  if (!runner) return;
+  runner.x = event.x;
+  runner.y = event.y;
+  runner.targetX = event.x;
+  runner.targetY = event.y;
+});
 socket.on("player:state", (runner: NetworkPlayer) => {
   if (!multiplayerActive || runner.id === getLocalNetworkPlayerId()) return;
   upsertRemotePlayer(runner);
@@ -2971,7 +3544,9 @@ const pressedKeys = installInputController({
   onPrimaryAction: () => fireBasicShot(performance.now()),
   onSecondaryAction: () => {
     const now = performance.now();
-    if (gameMode === "track") useSkill(equippedSkill, now);
+    if (gameMode === "track" && isPassiveSkill(equippedSkill)) {
+      showToast(`${skillLabels[equippedSkill]}은 지급 즉시 자동 적용 중입니다.`);
+    } else if (gameMode === "track") useSkill(equippedSkill, now);
     else useRandomSkill(now);
   },
   onEscape: () => {

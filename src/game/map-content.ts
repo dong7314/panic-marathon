@@ -1,10 +1,8 @@
 import type { MapId } from "../../shared/map-catalog.mjs";
 import type { WorldProp } from "./types";
 
-type MapNpc = Readonly<{ x: number; y: number; color: string }>;
 type MapPresentation = Readonly<{
   props: readonly WorldProp[];
-  npcs: readonly MapNpc[];
 }>;
 
 const MAP_CONTENT: Record<MapId, MapPresentation> = {
@@ -26,11 +24,31 @@ const MAP_CONTENT: Record<MapId, MapPresentation> = {
       { kind: "lamp", x: 144, y: 944, width: 16, height: 30 },
       { kind: "lamp", x: 1068, y: 944, width: 16, height: 30 },
     ],
-    npcs: [
-      { x: 271, y: 205, color: "#f4c562" },
-      { x: 400, y: 347, color: "#78d8e9" },
-      { x: 531, y: 367, color: "#a985e6" },
-      { x: 159, y: 312, color: "#e58fba" },
+  },
+  "space-station": {
+    props: [
+      { kind: "arcade", x: 255, y: 40, width: 27, height: 37 },
+      { kind: "arcade", x: 1062, y: 40, width: 27, height: 37 },
+      { kind: "vending", x: 41, y: 320, width: 28, height: 36 },
+      { kind: "vending", x: 1270, y: 622, width: 28, height: 36 },
+      { kind: "crate", x: 305, y: 253, width: 27, height: 25 },
+      { kind: "crate", x: 1012, y: 687, width: 27, height: 25 },
+      { kind: "table", x: 606, y: 459, width: 42, height: 28 },
+      { kind: "table", x: 695, y: 514, width: 42, height: 28 },
+      { kind: "lamp", x: 380, y: 39, width: 16, height: 30 },
+      { kind: "lamp", x: 948, y: 39, width: 16, height: 30 },
+      { kind: "lamp", x: 380, y: 938, width: 16, height: 30 },
+      { kind: "lamp", x: 948, y: 938, width: 16, height: 30 },
+    ],
+  },
+  "mountain-pass": {
+    props: [
+      { kind: "plant", x: 285, y: 1028, width: 20, height: 24 },
+      { kind: "plant", x: 450, y: 1223, width: 20, height: 24 },
+      { kind: "crate", x: 870, y: 750, width: 27, height: 25 },
+      { kind: "plant", x: 930, y: 975, width: 20, height: 24 },
+      { kind: "plant", x: 1320, y: 450, width: 20, height: 24 },
+      { kind: "crate", x: 1695, y: 473, width: 27, height: 25 },
     ],
   },
 };

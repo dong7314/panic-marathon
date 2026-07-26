@@ -1,4 +1,4 @@
-const CONTROL_FIELDS = Object.freeze(["fallingUntil", "airUntil", "grappleUntil", "pushUntil", "sleepUntil"]);
+const CONTROL_FIELDS = Object.freeze(["fallingUntil", "airUntil", "flattenedUntil", "grappleUntil", "pushUntil", "sleepUntil"]);
 const MODIFIER_FIELDS = Object.freeze(["slowUntil", "runUntil"]);
 
 function activeUntil(player, field, now) {
@@ -9,6 +9,7 @@ function activeUntil(player, field, now) {
 export function getPlayerActionState(player, now = Date.now()) {
   if ((Number(player?.fallingUntil) || 0) > 0) return "falling";
   if (activeUntil(player, "airUntil", now)) return "airborne";
+  if ((Number(player?.flattenedUntil) || 0) > 0) return "flattened";
   if (activeUntil(player, "grappleUntil", now)) return "grappled";
   if (activeUntil(player, "pushUntil", now)) return "pushed";
   if (activeUntil(player, "sleepUntil", now)) return "sleeping";
@@ -20,6 +21,7 @@ export function getPlayerActionStateRemaining(player, now = Date.now()) {
   const field = {
     falling: "fallingUntil",
     airborne: "airUntil",
+    flattened: "flattenedUntil",
     grappled: "grappleUntil",
     pushed: "pushUntil",
     sleeping: "sleepUntil",
@@ -37,7 +39,7 @@ export function canPlayerAct(player, now = Date.now()) {
 
 export function canPlayerReceiveHit(player, now = Date.now()) {
   const state = getPlayerActionState(player, now);
-  return state !== "falling" && state !== "airborne";
+  return state !== "falling" && state !== "airborne" && state !== "flattened";
 }
 
 export function canPlayerBeDisplaced(player, now = Date.now()) {
@@ -58,15 +60,22 @@ export function enterFallingState(player, until) {
 export function enterAirborneState(player, until) {
   player.fallingUntil = 0;
   player.airUntil = until;
+  player.flattenedUntil = 0;
   player.grappleUntil = 0;
   player.pushUntil = 0;
   player.sleepUntil = 0;
+}
+
+export function enterFlattenedState(player, until) {
+  resetPlayerTimedStates(player);
+  player.flattenedUntil = until;
 }
 
 export function enterDisplacementState(player, kind, until) {
   if (kind !== "grappled" && kind !== "pushed") throw new TypeError(`Unsupported displacement state: ${kind}`);
   player.fallingUntil = 0;
   player.airUntil = 0;
+  player.flattenedUntil = 0;
   player.grappleUntil = kind === "grappled" ? until : 0;
   player.pushUntil = kind === "pushed" ? until : 0;
 }

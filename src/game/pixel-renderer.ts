@@ -31,23 +31,22 @@ export function drawPerson(
   const outline = "#25233a";
   const uniformShadow = darken(color);
   if (sleeping) {
-    const breath = Math.floor(walking) % 2;
     fillRect(context, "rgba(22,19,38,.4)", x - 13, y + 7, 27, 4);
-    fillRect(context, outline, x + 5, y + 1 - breath, 9, 8);
-    fillRect(context, uniformShadow, x + 6, y + 2 - breath, 7, 6);
-    fillRect(context, "#f0e4d5", x + 11, y + 3 - breath, 3, 2);
-    fillRect(context, outline, x - 5, y - 3 - breath, 13, 11);
-    fillRect(context, uniformShadow, x - 4, y - 2 - breath, 11, 9);
-    fillRect(context, color, x - 4, y - 2 - breath, 9, 7);
-    fillRect(context, "#fff4cf", x - 2, y - 1 - breath, 5, 3);
-    fillRect(context, outline, x - 13, y - 5 - breath, 10, 11);
-    fillRect(context, "#f4d9c7", x - 12, y - 4 - breath, 8, 9);
-    fillRect(context, npc ? "#54415e" : "#34304c", x - 13, y - 5 - breath, 9, 4);
-    fillRect(context, npc ? "#6e5a79" : uniformShadow, x - 12, y - 5 - breath, 7, 2);
-    fillRect(context, "#273047", x - 11, y - breath, 3, 1);
-    fillRect(context, "#d5968f", x - 11, y + 3 - breath, 2, 1);
-    fillRect(context, outline, x - 1, y + 5 - breath, 8, 4);
-    fillRect(context, "#f4d9c7", x, y + 5 - breath, 6, 2);
+    fillRect(context, outline, x + 5, y + 1, 9, 8);
+    fillRect(context, uniformShadow, x + 6, y + 2, 7, 6);
+    fillRect(context, "#f0e4d5", x + 11, y + 3, 3, 2);
+    fillRect(context, outline, x - 5, y - 3, 13, 11);
+    fillRect(context, uniformShadow, x - 4, y - 2, 11, 9);
+    fillRect(context, color, x - 4, y - 2, 9, 7);
+    fillRect(context, "#fff4cf", x - 2, y - 1, 5, 3);
+    fillRect(context, outline, x - 13, y - 5, 10, 11);
+    fillRect(context, "#f4d9c7", x - 12, y - 4, 8, 9);
+    fillRect(context, npc ? "#54415e" : "#34304c", x - 13, y - 5, 9, 4);
+    fillRect(context, npc ? "#6e5a79" : uniformShadow, x - 12, y - 5, 7, 2);
+    fillRect(context, "#273047", x - 11, y, 3, 1);
+    fillRect(context, "#d5968f", x - 11, y + 3, 2, 1);
+    fillRect(context, outline, x - 1, y + 5, 8, 4);
+    fillRect(context, "#f4d9c7", x, y + 5, 6, 2);
     return;
   }
 

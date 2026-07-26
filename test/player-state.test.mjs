@@ -9,6 +9,7 @@ import {
   enterAirborneState,
   enterDisplacementState,
   enterFallingState,
+  enterFlattenedState,
   getPlayerActionState,
   getPlayerActionStateRemaining,
   resetPlayerTimedStates,
@@ -18,6 +19,7 @@ function makeState(overrides = {}) {
   return {
     fallingUntil: 0,
     airUntil: 0,
+    flattenedUntil: 0,
     grappleUntil: 0,
     pushUntil: 0,
     sleepUntil: 0,
@@ -32,6 +34,7 @@ test("player action states follow the shared control priority", () => {
   const player = makeState({
     fallingUntil: 2_000,
     airUntil: 2_100,
+    flattenedUntil: 2_150,
     grappleUntil: 2_200,
     pushUntil: 2_300,
     sleepUntil: 2_400,
@@ -42,6 +45,8 @@ test("player action states follow the shared control priority", () => {
   player.fallingUntil = 0;
   assert.equal(getPlayerActionState(player, now), "airborne");
   player.airUntil = 0;
+  assert.equal(getPlayerActionState(player, now), "flattened");
+  player.flattenedUntil = 0;
   assert.equal(getPlayerActionState(player, now), "grappled");
   player.grappleUntil = 0;
   assert.equal(getPlayerActionState(player, now), "pushed");
@@ -76,6 +81,12 @@ test("movement, actions, hits, and displacement use one state policy", () => {
   assert.equal(canPlayerAct(airborne, now), false);
   assert.equal(canPlayerReceiveHit(airborne, now), false);
   assert.equal(canPlayerBeDisplaced(airborne, now), false);
+
+  const flattened = makeState({ flattenedUntil: now + 500 });
+  assert.equal(canPlayerMove(flattened, now), false);
+  assert.equal(canPlayerAct(flattened, now), false);
+  assert.equal(canPlayerReceiveHit(flattened, now), false);
+  assert.equal(canPlayerBeDisplaced(flattened, now), false);
 });
 
 test("higher-priority transitions clear conflicting lower states", () => {
@@ -98,9 +109,18 @@ test("higher-priority transitions clear conflicting lower states", () => {
   assert.equal(player.slowUntil, now + 3_000);
   assert.equal(player.runUntil, now + 4_000);
 
+  enterFlattenedState(player, now + 800);
+  assert.equal(getPlayerActionState(player, now), "flattened");
+  assert.equal(player.airUntil, 0);
+  assert.equal(player.pushUntil, 0);
+  assert.equal(player.sleepUntil, 0);
+  assert.equal(player.slowUntil, 0);
+  assert.equal(player.runUntil, 0);
+
   enterFallingState(player, now + 700);
   assert.equal(getPlayerActionState(player, now), "falling");
   assert.equal(player.airUntil, 0);
+  assert.equal(player.flattenedUntil, 0);
   assert.equal(player.slowUntil, 0);
   assert.equal(player.runUntil, 0);
 
