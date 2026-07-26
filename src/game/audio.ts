@@ -1,3 +1,8 @@
+import {
+  MUSIC_THEMES,
+  type MusicThemeId,
+} from "../../shared/music-themes.mjs";
+
 export type GameSound =
   | "ui"
   | "countdown"
@@ -12,19 +17,8 @@ export type GameSound =
   | "finish";
 
 const STORAGE_KEY = "panic-marathon:audio-muted:v1";
-const MUSIC_STEP_SECONDS = .15;
 const MUSIC_LOOKAHEAD_SECONDS = .75;
-const MELODY = [
-  293.66, 369.99, 440, 493.88, 440, 369.99, 329.63, 369.99,
-  440, 493.88, 587.33, 659.25, 587.33, 493.88, 440, 369.99,
-  329.63, 369.99, 440, 587.33, 493.88, 440, 369.99, 329.63,
-  293.66, 329.63, 369.99, 440, 369.99, 329.63, 293.66, 246.94,
-  293.66, 369.99, 440, 493.88, 587.33, 493.88, 440, 369.99,
-  329.63, 440, 493.88, 587.33, 659.25, 587.33, 493.88, 440,
-  369.99, 440, 493.88, 369.99, 329.63, 369.99, 440, 493.88,
-  587.33, 493.88, 440, 369.99, 329.63, 293.66, 246.94, 293.66,
-] as const;
-const BASS_ROOTS = [146.83, 123.47, 164.81, 110] as const;
+const MUSIC_TRANSITION_SECONDS = .18;
 
 export class GameAudio {
   #context: AudioContext | undefined;
@@ -33,6 +27,8 @@ export class GameAudio {
   #musicTimer: number | undefined;
   #musicStep = 0;
   #nextMusicNoteAt = 0;
+  #musicTheme: MusicThemeId = "lobby";
+  #musicSources = new Set<OscillatorNode>();
   #muted: boolean;
 
   constructor() {
@@ -47,12 +43,46 @@ export class GameAudio {
     return this.#muted;
   }
 
+  get musicTheme() {
+    return this.#musicTheme;
+  }
+
+  setMusicTheme(theme: MusicThemeId) {
+    if (this.#musicTheme === theme) return;
+    this.#musicTheme = theme;
+    this.#musicStep = 0;
+
+    const context = this.#context;
+    const music = this.#music;
+    if (!context || !music) return;
+    const now = context.currentTime;
+    const fadeOutEndsAt = now + MUSIC_TRANSITION_SECONDS * .45;
+    const nextThemeStartsAt = now + MUSIC_TRANSITION_SECONDS * .65;
+    this.#nextMusicNoteAt = nextThemeStartsAt;
+
+    music.gain.cancelScheduledValues(now);
+    music.gain.setValueAtTime(Math.max(.0001, music.gain.value), now);
+    music.gain.exponentialRampToValueAtTime(.0001, fadeOutEndsAt);
+    for (const source of [...this.#musicSources]) {
+      try {
+        source.stop(fadeOutEndsAt + .01);
+      } catch {
+        this.#musicSources.delete(source);
+      }
+    }
+    music.gain.setValueAtTime(.0001, nextThemeStartsAt);
+    music.gain.exponentialRampToValueAtTime(
+      MUSIC_THEMES[theme].gain,
+      now + MUSIC_TRANSITION_SECONDS,
+    );
+  }
+
   async unlock() {
     if (!this.#context) {
       this.#context = new AudioContext();
       this.#master = this.#context.createGain();
       this.#music = this.#context.createGain();
-      this.#music.gain.value = .46;
+      this.#music.gain.value = MUSIC_THEMES[this.#musicTheme].gain;
       this.#music.connect(this.#master);
       this.#master.connect(this.#context.destination);
       this.#applyMute();
@@ -126,6 +156,7 @@ export class GameAudio {
     type: OscillatorType,
     destination: AudioNode,
     endFrequency = frequency,
+    musicSource = false,
   ) {
     const context = this.#context;
     if (!context) return;
@@ -139,6 +170,10 @@ export class GameAudio {
     gain.gain.exponentialRampToValueAtTime(.0001, start + duration);
     oscillator.connect(gain);
     gain.connect(destination);
+    if (musicSource) {
+      this.#musicSources.add(oscillator);
+      oscillator.addEventListener("ended", () => this.#musicSources.delete(oscillator), { once: true });
+    }
     oscillator.start(start);
     oscillator.stop(start + duration + .02);
   }
@@ -175,22 +210,63 @@ export class GameAudio {
         this.#nextMusicNoteAt = context.currentTime + .05;
       }
       while (this.#nextMusicNoteAt < context.currentTime + MUSIC_LOOKAHEAD_SECONDS) {
-        const step = this.#musicStep % MELODY.length;
-        const beat = step % 4;
-        const bar = Math.floor(step / 16) % BASS_ROOTS.length;
-        const melodyFrequency = MELODY[step];
-        this.#tone(melodyFrequency, this.#nextMusicNoteAt, MUSIC_STEP_SECONDS * 1.22, .055, "square", music);
-        if (step % 2 === 0) {
-          const harmony = step % 8 < 4 ? melodyFrequency / 2 : melodyFrequency * .75;
-          this.#tone(harmony, this.#nextMusicNoteAt, MUSIC_STEP_SECONDS * 1.7, .026, "triangle", music);
+        const theme = MUSIC_THEMES[this.#musicTheme];
+        const step = this.#musicStep % theme.melody.length;
+        const melodyFrequency = theme.melody[step];
+        if (melodyFrequency !== null) {
+          this.#tone(
+            melodyFrequency,
+            this.#nextMusicNoteAt,
+            theme.stepSeconds * theme.lead.durationSteps,
+            theme.lead.volume,
+            theme.lead.type,
+            music,
+            melodyFrequency,
+            true,
+          );
         }
-        if (beat === 0) {
-          const bass = BASS_ROOTS[bar];
-          this.#tone(bass, this.#nextMusicNoteAt, MUSIC_STEP_SECONDS * 3.4, .052, "triangle", music);
-          this.#tone(82, this.#nextMusicNoteAt, .08, .035, "sine", music, 46);
+        if (melodyFrequency !== null && step % theme.harmony.everySteps === 0) {
+          const harmonyIndex = Math.floor(step / theme.harmony.everySteps) % theme.harmony.ratios.length;
+          const harmonyFrequency = melodyFrequency * theme.harmony.ratios[harmonyIndex];
+          this.#tone(
+            harmonyFrequency,
+            this.#nextMusicNoteAt,
+            theme.stepSeconds * theme.harmony.durationSteps,
+            theme.harmony.volume,
+            theme.harmony.type,
+            music,
+            harmonyFrequency,
+            true,
+          );
         }
-        this.#musicStep = (this.#musicStep + 1) % MELODY.length;
-        this.#nextMusicNoteAt += MUSIC_STEP_SECONDS;
+        if (step % 4 === 0) {
+          const bassIndex = Math.floor(step / theme.bassChangeSteps) % theme.bassRoots.length;
+          const bassFrequency = theme.bassRoots[bassIndex];
+          this.#tone(
+            bassFrequency,
+            this.#nextMusicNoteAt,
+            theme.stepSeconds * theme.bass.durationSteps,
+            theme.bass.volume,
+            theme.bass.type,
+            music,
+            bassFrequency,
+            true,
+          );
+        }
+        if (step % theme.pulse.everySteps === 0) {
+          this.#tone(
+            theme.pulse.frequency,
+            this.#nextMusicNoteAt,
+            theme.pulse.durationSeconds,
+            theme.pulse.volume,
+            theme.pulse.type,
+            music,
+            theme.pulse.endFrequency,
+            true,
+          );
+        }
+        this.#musicStep = (this.#musicStep + 1) % theme.melody.length;
+        this.#nextMusicNoteAt += theme.stepSeconds;
       }
     };
     this.#nextMusicNoteAt = this.#context?.currentTime ?? 0;
