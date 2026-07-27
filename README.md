@@ -6,6 +6,7 @@
 
 ```bash
 npm install
+npm run test:browser:install
 npm run dev
 ```
 
@@ -57,6 +58,7 @@ src/game/match-countdown.ts 서버 기준 경기 시작 카운트다운
 src/game/input-controller.ts 키보드·포인터 입력 연결
 src/game/audio.ts           효과음·칩튠 BGM
 src/game/world-renderer.ts  맵 테마·배경 픽셀 렌더링
+src/game/world-prop-renderer.ts 장애물·암벽 픽셀 렌더링
 src/game/pixel-renderer.ts  러너 공통 픽셀 렌더링
 src/game/map-content.ts     맵별 오브젝트·NPC 배치
 server/index.mjs            Socket.IO 방, 전투, 레이스·함정 판정
@@ -64,7 +66,11 @@ server/config.mjs           실행 환경과 배포 설정
 server/http-handler.mjs     정적 SPA, health/readiness 응답
 server/player-session.mjs   고정 ID·재접속 토큰·방장 선택
 server/room-state.mjs       방 설정 검증과 초기 상태 생성
+server/room-store.mjs       방 저장소 경계와 전체 방 수 제한
+server/room-snapshot.mjs    클라이언트 공개 방 상태 직렬화
+server/socket-guard.mjs     주소별 연결·이벤트 속도 제한
 shared/map-catalog.mjs      맵별 테마·경계·서버 장애물 규칙
+shared/network-protocol.mjs Socket.IO 이벤트·입력 검증 공통 계약
 shared/game-rules.mjs       클라이언트·서버 공통 규칙과 맵 데이터
 shared/geometry.mjs         공통 트랙·충돌 계산
 shared/movement-validation.mjs  서버 이동 검증
@@ -87,7 +93,12 @@ npm run serve
 | `HOST` | `0.0.0.0` | Node 서버 바인딩 주소 |
 | `PORT` | `5175` | HTTP·Socket.IO 공용 포트 |
 | `STATIC_DIR` | `dist` | 정적 빌드 디렉터리 |
-| `CLIENT_ORIGIN(S)` | 모든 출처 | 필요할 때 CORS 허용 출처를 쉼표로 제한 |
+| `CLIENT_ORIGIN(S)` | 개발: 모든 출처, 운영: 교차 출처 차단 | CORS 허용 출처를 쉼표로 제한 |
+| `MAX_ROOMS` | `100` | 동시에 유지할 전체 방 수 |
+| `MAX_CONNECTIONS_PER_ADDRESS` | `32` | 같은 주소에서 허용할 Socket.IO 연결 수 |
+| `MAX_STATE_EVENTS_PER_SECOND` | `120` | 소켓별 초당 위치 상태 요청 수 |
+| `MAX_COMBAT_EVENTS_PER_SECOND` | `30` | 소켓별 초당 전투 요청 수 |
+| `MAX_ROOM_EVENTS_PER_MINUTE` | `30` | 소켓별 분당 방 관리 요청 수 |
 
 - `GET /healthz`: 방·플레이어·소켓 연결 수와 경기 단계 확인
 - `GET /readyz`: 정적 빌드가 준비됐는지 확인
@@ -99,6 +110,7 @@ npm run check
 npm test
 npm run build
 npm run check:server
+npm run test:browser
 ```
 
 전체 검증은 `npm run verify`로 한 번에 실행할 수 있습니다.
@@ -106,5 +118,6 @@ npm run check:server
 - `npm run test:load`: 2·4·6인 방을 동시에 실행하는 지속 위치 패킷 부하 검증
 - `npm run test:soak`: 2·4·6인 방을 30분간 동시 구동하며 메모리·응답 지연·재접속을 측정
 - `npm run test:deployment`: 정적 SPA·상태 확인·Socket.IO·정상 종료 검증
+- `npm run test:browser`: 실제 Chromium 두 개로 방 생성부터 인게임 HUD·입력·연결 종료까지 검증
 
 장시간 시간을 조절하려면 `SOAK_DURATION_MS`를 지정합니다. 예를 들어 PowerShell에서 1분 검증은 `$env:SOAK_DURATION_MS="60000"; npm run test:soak`입니다.
