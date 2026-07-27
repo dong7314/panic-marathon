@@ -1,9 +1,38 @@
 import type { SkillId } from "../../shared/game-rules.mjs";
-import type { MapId } from "../../shared/map-catalog.mjs";
-import type { GeneratedPitZone, GeneratedSpinner } from "../../shared/map-hazards.mjs";
-import type { PlayerActionState } from "../../shared/player-state.mjs";
+import type {
+  HazardEffect,
+  NetworkClone,
+  NetworkDirection,
+  NetworkHazards,
+  NetworkMatchResult,
+  NetworkObstacle,
+  NetworkPlayer,
+  NetworkResponse,
+  NetworkRock,
+  NetworkRoom,
+  NetworkRoomPhase,
+  NetworkSession,
+  NetworkStanding,
+  RoomConfig,
+} from "../../shared/network-protocol.mjs";
 
-export type Direction = "down" | "up" | "left" | "right";
+export type {
+  HazardEffect,
+  NetworkClone,
+  NetworkHazards,
+  NetworkMatchResult,
+  NetworkObstacle,
+  NetworkPlayer,
+  NetworkResponse,
+  NetworkRock,
+  NetworkRoom,
+  NetworkRoomPhase,
+  NetworkSession,
+  NetworkStanding,
+  RoomConfig,
+} from "../../shared/network-protocol.mjs";
+
+export type Direction = NetworkDirection;
 export type PropKind =
   | "vending"
   | "bench"
@@ -60,84 +89,9 @@ export type Player = {
 export type Spinner = { x: number; y: number; radius: number; angle: number; speed: number };
 export type Pit = { x: number; y: number; width: number; height: number; active: boolean };
 export type AimState = { screenX: number; screenY: number; worldX: number; worldY: number; visible: boolean; pulseUntil: number; pulseX: number; pulseY: number };
-export type GameMode = "track" | "practice";
-export type TestBot = { id: number; x: number; y: number; direction: Direction; walking: number; color: string; name: string; skill: SkillId; moveX: number; moveY: number; nextTurnAt: number; knockbackX: number; knockbackY: number; slowUntil: number; sleepUntil: number; health: number; lap: number; checkpoint: number; routeIndex: number; shotReadyAt: number };
 export type Clone = { x: number; y: number; direction: Direction; until: number; ownerId?: string };
-export type Projectile = { kind: "slow" | "sleep" | "bullet"; owner: "player" | "bot" | "remote"; sourceId?: string | number; x: number; y: number; velocityX: number; velocityY: number; until: number; radius: number; visualOnly?: boolean };
-export type RoomConfig = { lapLimit: number; playerCount: number; mapId: MapId; enabledSkills: SkillId[] };
-
-export type NetworkPlayer = {
-  id: string;
-  name: string;
-  color: string;
-  x: number;
-  y: number;
-  direction: Direction;
-  walking: number;
-  health: number;
-  ammo: number;
-  skill: SkillId;
-  lap: number;
-  checkpoint: number;
-  skillCooldownMs?: number;
-  cloneCount?: number;
-  dashCharges?: number;
-  dashRechargeMs?: number;
-  actionState?: PlayerActionState;
-  actionStateMs?: number;
-  grappleMs?: number;
-  pushMs?: number;
-  sleepMs?: number;
-  slowMs?: number;
-  runMs?: number;
-  flattenedMs?: number;
-  flattenedElapsedMs?: number;
-  fallingMs?: number;
-  fallingElapsedMs?: number;
-  fallTargetX?: number;
-  fallTargetY?: number;
-  fallKind?: "pit" | "void";
-  airMs?: number;
-  airElapsedMs?: number;
-  airStartX?: number;
-  airStartY?: number;
-  airEndX?: number;
-  airEndY?: number;
-  connected: boolean;
-  reconnectMs: number;
-};
-
-export type NetworkClone = { id: string; ownerId: string; x: number; y: number; direction: Direction; until: number };
+export type Projectile = { kind: "slow" | "sleep" | "bullet"; owner: "player" | "remote"; sourceId?: string; x: number; y: number; velocityX: number; velocityY: number; until: number; radius: number; visualOnly?: boolean };
 export type RollingRock = { id: string; x: number; y: number; velocityX: number; velocityY: number; radius: number; until: number; angle: number };
-export type NetworkRock = { id: string; x: number; y: number; velocityX: number; velocityY: number; radius: number; remainingMs: number };
-export type NetworkObstacle = {
-  id: string;
-  bandId: string;
-  laneIndex: number;
-  axis: "horizontal" | "vertical";
-  kind: Extract<PropKind, "traffic-cone" | "school-hurdle" | "space-crate" | "space-pylon">;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-};
-export type NetworkHazards = { activePitIndex: number; warningPitIndex: number; warningMs: number; nextPitMs: number; spinnerElapsedMs: number };
-export type NetworkRoomPhase = "waiting" | "running" | "finished";
-export type NetworkStanding = {
-  place: number;
-  id: string;
-  name: string;
-  color: string;
-  lap: number;
-  checkpoint: number;
-  completed: boolean;
-  finishTimeMs: number | null;
-};
-export type NetworkMatchResult = {
-  reason: "completed" | "time-limit";
-  durationMs: number;
-  standings: NetworkStanding[];
-};
 export type RemotePlayer = NetworkPlayer & {
   targetX: number;
   targetY: number;
@@ -155,34 +109,7 @@ export type RemotePlayer = NetworkPlayer & {
   slowEffectUntil: number;
   sleepEffectUntil: number;
 };
-
-export type NetworkRoom = {
-  code: string;
-  hostId: string;
-  config: RoomConfig;
-  phase: NetworkRoomPhase;
-  round: number;
-  started: boolean;
-  finished: boolean;
-  countdownMs: number;
-  winner: { id: string; name: string } | null;
-  result: NetworkMatchResult | null;
-  hazards: NetworkHazards;
-  players: NetworkPlayer[];
-  clones: NetworkClone[];
-  obstacles: NetworkObstacle[];
-  pitZones: GeneratedPitZone[];
-  spinners: GeneratedSpinner[];
-  rocks: NetworkRock[];
-};
-export type NetworkSession = { roomCode: string; playerId: string; reconnectToken: string };
-export type NetworkResponse = { ok: true; room: NetworkRoom; session?: NetworkSession } | { ok: false; error: string };
-export type LabelledRunner = Pick<TestBot, "id" | "name" | "skill"> | Pick<RemotePlayer, "id" | "name" | "skill" | "skillCooldownUntil" | "cloneCount" | "dashCharges" | "dashRechargeUntil" | "connected">;
-export type GrappleEffect = { sourceId: string | number; targetId?: string | number; sourceX: number; sourceY: number; hookX: number; hookY: number; targetStartX?: number; targetStartY?: number; targetEndX?: number; targetEndY?: number; startedAt: number; until: number };
+export type LabelledRunner = Pick<RemotePlayer, "id" | "name" | "skill" | "skillCooldownUntil" | "cloneCount" | "dashCharges" | "dashRechargeUntil" | "connected">;
+export type GrappleEffect = { sourceId: string; targetId?: string; sourceX: number; sourceY: number; hookX: number; hookY: number; targetStartX?: number; targetStartY?: number; targetEndX?: number; targetEndY?: number; startedAt: number; until: number };
 export type PushEffect = { sourceId: string; targetId: string; startX: number; startY: number; endX: number; endY: number; duration: number; startedAt: number; until: number };
 export type SlowImpact = { x: number; y: number; startedAt: number; until: number };
-export type HazardEffect =
-  | { kind: "pit"; playerId: string; duration: number; targetX: number; targetY: number }
-  | { kind: "void"; playerId: string; duration: number; targetX: number; targetY: number }
-  | { kind: "jump"; playerId: string; duration: number; startX: number; startY: number; endX: number; endY: number }
-  | { kind: "respawn"; reason?: "rock" | "pit" | "void"; playerId: string; x: number; y: number; health: number; ammo: number };
