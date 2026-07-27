@@ -1,37 +1,22 @@
-import titleKeyArt from "./assets/title-keyart-pixel-v3.png";
-import { io } from "socket.io-client";
+import titleKeyArt from "./assets/title-keyart-pixel-v3.webp";
+import { io, type Socket } from "socket.io-client";
 import {
   CLONE_COOLDOWN,
   CLONE_DURATION,
   CLONE_LIMIT,
   DASH_RECHARGE_DURATION,
   FLY_VISUAL_LIFT,
-  GRAB_HIT_RADIUS,
-  GRAB_RANGE,
-  PIT_CYCLE_MIN_DELAY,
-  PIT_CYCLE_RANDOM_DELAY,
-  PIT_WARNING_DURATION,
   PLAYER_BASE_SPEED,
   RUN_DURATION,
   ROCK_SQUASH_DURATION,
   START_POINT,
-  WORLD_HEIGHT,
-  WORLD_WIDTH,
   getSkillBodyScale,
-  getSkillHitRadius,
   getMovementSpeedMultiplier,
   getSkillRenderLayer,
-  isDamageImmune,
-  isGroundHazardImmune,
   isGiantBodyMovementBlocked,
   isObstacleImmune,
   isPassiveSkill,
-  isVoidFallImmune,
-  isTargetOnAimLine,
-  isTargetWithinScaledRange,
-  pickNextSkill,
   runnersOverlap,
-  runnerTouchesRaceZone,
   runnerTouchesObstacle,
   type SkillId,
 } from "../shared/game-rules.mjs";
@@ -42,9 +27,30 @@ import {
   type MapId,
 } from "../shared/map-catalog.mjs";
 import type { GeneratedMapHazards } from "../shared/map-hazards.mjs";
-import { canStandOnMap, getTrackFallTarget, insideRect, isMapTrackPoint, pointSegmentDistance } from "../shared/geometry.mjs";
+import { canStandOnMap } from "../shared/geometry.mjs";
 import type { MusicThemeId } from "../shared/music-themes.mjs";
+import {
+  CLIENT_EVENTS,
+  SERVER_EVENTS,
+  type ClientToServerEvents,
+  type NetworkCombatEffect,
+  type NetworkGrapple,
+  type NetworkKnockback,
+  type NetworkProjectile,
+  type NetworkRockRemoval,
+  type NetworkShot,
+  type NetworkTeleport,
+  type RoomCreatePayload,
+  type RoomJoinPayload,
+  type ServerToClientEvents,
+} from "../shared/network-protocol.mjs";
 import { GameAudio } from "./game/audio";
+import {
+  drawCheckpoint,
+  drawJumpPad,
+  drawPit,
+  drawSpinner,
+} from "./game/hazard-renderer";
 import { installInputController } from "./game/input-controller";
 import { getMapPresentation } from "./game/map-content";
 import { MatchCountdown } from "./game/match-countdown";
@@ -54,12 +60,12 @@ import {
   resolveMultiplayerEndpoint,
 } from "./game/network-session";
 import { drawPerson, fillRect } from "./game/pixel-renderer";
+import { drawRollingRock, drawWorldProp } from "./game/world-prop-renderer";
 import { drawWorldFloor } from "./game/world-renderer";
 import type {
   AimState,
   Clone,
   Direction,
-  GameMode,
   GrappleEffect,
   HazardEffect,
   LabelledRunner,
@@ -80,14 +86,12 @@ import type {
   RoomConfig,
   SlowImpact,
   Spinner,
-  TestBot,
   WorldProp,
 } from "./game/types";
 import "./style.css";
 
 const VIEW_WIDTH = 384;
 const VIEW_HEIGHT = 216;
-const PRACTICE_TILE = 16;
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("앱을 찾을 수 없어요.");
@@ -128,9 +132,18 @@ app.innerHTML = `
               <option value="space-station">우주 정거장 · 트랙 이탈 시 추락</option>
               <option value="mountain-pass">우당탕 산맥 · 직선 오르막과 낙석</option>
             </select>
-            <span class="title-skill-label">사용 스킬 <b>최소 3개</b></span>
+            <span class="title-skill-label">사용 스킬 <b id="title-skill-count" aria-live="polite">10개 선택 · 최소 3개</b></span>
             <div id="title-skill-pool" class="title-skill-options">
-              <label><input type="checkbox" value="push" checked /> 밀치기</label><label><input type="checkbox" value="dash" checked /> 돌진</label><label><input type="checkbox" value="run" checked /> 질주</label><label><input type="checkbox" value="grab" checked /> 그랩</label><label><input type="checkbox" value="clone" checked /> 분신</label><label><input type="checkbox" value="slow" checked /> 슬로우탄</label><label><input type="checkbox" value="sleep" checked /> 수면총</label><label><input type="checkbox" value="fly" checked /> 공중부양</label><label><input type="checkbox" value="slow30" checked /> 속도 30%</label><label><input type="checkbox" value="giant" checked /> 5배 거대화</label>
+              <label><input type="checkbox" value="push" checked /><span>밀치기</span></label>
+              <label><input type="checkbox" value="dash" checked /><span>돌진</span></label>
+              <label><input type="checkbox" value="run" checked /><span>질주</span></label>
+              <label><input type="checkbox" value="grab" checked /><span>그랩</span></label>
+              <label><input type="checkbox" value="clone" checked /><span>분신</span></label>
+              <label><input type="checkbox" value="slow" checked /><span>슬로우탄</span></label>
+              <label><input type="checkbox" value="sleep" checked /><span>수면총</span></label>
+              <label><input type="checkbox" value="fly" checked /><span>공중부양</span></label>
+              <label><input type="checkbox" value="slow30" checked /><span>속도 30%</span></label>
+              <label><input type="checkbox" value="giant" checked /><span>5배 거대화</span></label>
             </div>
           </div>
           <div id="title-waiting-summary" class="title-waiting-summary hidden">
@@ -227,6 +240,7 @@ const elements = {
   titlePlayerCount: getElement<HTMLInputElement>("#title-player-count"),
   titleMapId: getElement<HTMLSelectElement>("#title-map-id"),
   titleInviteCode: getElement<HTMLInputElement>("#title-invite-code"),
+  titleSkillCount: getElement<HTMLElement>("#title-skill-count"),
   titleSkillPool: getElement<HTMLElement>("#title-skill-pool"),
   titleConfirm: getElement<HTMLButtonElement>("#title-confirm-room"),
   titlePanelBack: getElement<HTMLButtonElement>("#title-panel-back"),
@@ -272,18 +286,15 @@ let jumpPads = currentMap.jumpPads;
 let checkpoints = currentMap.checkpoints;
 const rollingRocks: RollingRock[] = [];
 const player: Player = { x: START_POINT.x, y: START_POINT.y, direction: "right", walking: 0, name: "말썽꾸러기", color: "#f16c7a", knockbackX: 0, knockbackY: 0, hitUntil: 0, flattenedUntil: 0, flattenedStartedAt: 0, fallingUntil: 0, fallingStartedAt: 0, fallTargetX: 0, fallTargetY: 0, airUntil: 0, airStartedAt: 0, dashUntil: 0, dashVelocityX: 0, dashVelocityY: 0, health: 5, ammo: 3, shotReadyAt: 0 };
-const PRACTICE_ARENA = { left: 180, top: 136, right: 716, bottom: 536 };
-const testBots: TestBot[] = [];
-const LOCAL_GRAPPLE_ID = "local-player";
-type BotWorldLabelGroup = { container: HTMLDivElement; name: HTMLSpanElement; skill: HTMLSpanElement };
-const botWorldLabels = new Map<string | number, BotWorldLabelGroup>();
+type RunnerWorldLabelGroup = { container: HTMLDivElement; name: HTMLSpanElement; skill: HTMLSpanElement };
+const runnerWorldLabels = new Map<string, RunnerWorldLabelGroup>();
 const remotePlayers = new Map<string, RemotePlayer>();
 const multiplayerEndpoint = resolveMultiplayerEndpoint(
   window.location,
   import.meta.env.VITE_MULTIPLAYER_URL,
   import.meta.env.DEV,
 );
-const socket = io(multiplayerEndpoint, { autoConnect: false });
+const socket: Socket<ServerToClientEvents, ClientToServerEvents> = io(multiplayerEndpoint, { autoConnect: false });
 const networkSessionStore = new NetworkSessionStore(window.sessionStorage);
 let activeNetworkSession = networkSessionStore.current;
 let activeNetworkRoom: NetworkRoom | undefined;
@@ -308,7 +319,6 @@ const skillLabels: Record<SkillId, string> = { push: "밀치기", dash: "돌진"
 let dashCharges = 3;
 let dashRechargeAt = 0;
 let runUntil = 0;
-let gameMode: GameMode = "track";
 let roomConfig: RoomConfig = { lapLimit: 5, playerCount: 4, mapId: DEFAULT_MAP_ID, enabledSkills: ["push", "dash", "run", "grab", "clone", "slow", "sleep", "fly", "slow30", "giant"] };
 let equippedSkill: SkillId = "push";
 let matchFinished = false;
@@ -362,280 +372,6 @@ function applyMapDefinition(mapId: MapId) {
   warningPitIndex = -1;
   pitOpenAt = 0;
   jumpPadCooldownUntil = 0;
-}
-
-function drawVending(context: CanvasRenderingContext2D, x: number, y: number) {
-  fillRect(context, "#563b65", x + 2, y + 6, 24, 30);
-  fillRect(context, "#e65b71", x, y + 3, 24, 31);
-  fillRect(context, "#ff8a84", x + 3, y + 6, 18, 14);
-  fillRect(context, "#242542", x + 5, y + 8, 14, 9);
-  for (let row = 0; row < 2; row += 1) for (let column = 0; column < 3; column += 1) fillRect(context, (row + column) % 2 ? "#79d7f0" : "#ffd766", x + 6 + column * 4, y + 9 + row * 4, 2, 2);
-  fillRect(context, "#fff1d1", x + 4, y + 23, 14, 6);
-  fillRect(context, "#7e334c", x + 20, y + 10, 2, 15);
-  fillRect(context, "#3c2d4f", x + 3, y + 34, 20, 3);
-}
-
-function drawBench(context: CanvasRenderingContext2D, x: number, y: number) {
-  fillRect(context, "#6e4860", x + 2, y + 9, 35, 6);
-  fillRect(context, "#d08a5b", x, y + 4, 38, 7);
-  fillRect(context, "#efae73", x + 2, y + 5, 34, 2);
-  fillRect(context, "#4b3a52", x + 5, y + 15, 4, 5);
-  fillRect(context, "#4b3a52", x + 29, y + 15, 4, 5);
-}
-
-function drawCrate(context: CanvasRenderingContext2D, x: number, y: number) {
-  fillRect(context, "#664755", x + 2, y + 3, 20, 19);
-  fillRect(context, "#b7765b", x, y, 20, 20);
-  fillRect(context, "#e3aa6e", x + 3, y + 3, 14, 3);
-  fillRect(context, "#8a554e", x + 8, y + 3, 4, 14);
-  fillRect(context, "#8a554e", x + 3, y + 8, 14, 4);
-}
-
-function drawPlant(context: CanvasRenderingContext2D, x: number, y: number) {
-  fillRect(context, "#5a4355", x + 4, y + 15, 12, 9);
-  fillRect(context, "#e07b58", x + 3, y + 13, 14, 8);
-  fillRect(context, "#ffc07b", x + 5, y + 14, 10, 2);
-  fillRect(context, "#3b805d", x + 8, y + 2, 5, 13);
-  fillRect(context, "#5fae6e", x + 2, y + 6, 7, 6);
-  fillRect(context, "#5fae6e", x + 11, y + 4, 7, 7);
-  fillRect(context, "#8bd57b", x + 5, y, 5, 7);
-}
-
-function drawTable(context: CanvasRenderingContext2D, x: number, y: number) {
-  fillRect(context, "#52394c", x + 3, y + 11, 36, 15);
-  fillRect(context, "#c58a63", x, y + 5, 40, 13);
-  fillRect(context, "#f2bb7b", x + 3, y + 7, 34, 3);
-  fillRect(context, "#f5f1db", x + 10, y + 8, 8, 5);
-  fillRect(context, "#f5f1db", x + 23, y + 9, 10, 4);
-  fillRect(context, "#5e4254", x + 4, y + 18, 4, 9);
-  fillRect(context, "#5e4254", x + 32, y + 18, 4, 9);
-}
-
-function drawSofa(context: CanvasRenderingContext2D, x: number, y: number) {
-  fillRect(context, "#4e415a", x + 3, y + 8, 42, 17);
-  fillRect(context, "#6c8bc2", x, y + 6, 44, 16);
-  fillRect(context, "#91b5e7", x + 3, y + 8, 16, 7);
-  fillRect(context, "#91b5e7", x + 24, y + 8, 16, 7);
-  fillRect(context, "#4d5d92", x + 4, y + 19, 36, 4);
-  fillRect(context, "#3f354e", x + 4, y + 23, 4, 4);
-  fillRect(context, "#3f354e", x + 36, y + 23, 4, 4);
-}
-
-function drawLamp(context: CanvasRenderingContext2D, x: number, y: number) {
-  fillRect(context, "#52516c", x + 7, y + 10, 3, 20);
-  fillRect(context, "#414159", x + 3, y + 28, 11, 3);
-  fillRect(context, "#f3ca69", x + 3, y + 3, 11, 9);
-  fillRect(context, "#fff3ae", x + 5, y + 5, 7, 4);
-}
-
-function drawMailbox(context: CanvasRenderingContext2D, x: number, y: number) {
-  fillRect(context, "#4d4b66", x + 7, y + 15, 6, 15);
-  fillRect(context, "#5c94b2", x + 2, y + 3, 18, 16);
-  fillRect(context, "#94d5df", x + 4, y + 5, 14, 4);
-  fillRect(context, "#293851", x + 5, y + 12, 11, 2);
-  fillRect(context, "#ef6b6f", x + 19, y + 7, 4, 4);
-}
-
-function drawArcade(context: CanvasRenderingContext2D, x: number, y: number) {
-  fillRect(context, "#40344f", x + 2, y + 6, 23, 31);
-  fillRect(context, "#86528f", x, y + 2, 23, 31);
-  fillRect(context, "#f174ae", x + 3, y + 5, 17, 12);
-  fillRect(context, "#1e2945", x + 5, y + 7, 13, 8);
-  fillRect(context, "#74f0dc", x + 8, y + 9, 7, 3);
-  fillRect(context, "#f7d366", x + 8, y + 21, 3, 3);
-  fillRect(context, "#67c5df", x + 14, y + 21, 3, 3);
-  fillRect(context, "#3c2e49", x + 5, y + 33, 14, 4);
-}
-
-function drawRockWall(context: CanvasRenderingContext2D, x: number, y: number, width: number, height: number) {
-  const rows = Math.max(4, Math.floor(height / 15));
-  const rowHeight = Math.ceil((height - 5) / rows);
-  fillRect(context, "rgba(25,22,24,.38)", x + 5, y + height - 3, width, 9);
-
-  for (let row = 0; row < rows; row += 1) {
-    const topRow = row === 0;
-    const columns = row % 2 === 0 ? 3 : 4;
-    const sideInset = topRow ? Math.max(3, Math.floor(width * .14)) : row === 1 ? 2 : 0;
-    const availableWidth = width - sideInset * 2;
-    const rockWidth = Math.ceil(availableWidth / columns);
-    const rockY = y + 5 + row * rowHeight;
-    const rockHeight = Math.min(rowHeight + 3, y + height - rockY);
-    for (let column = 0; column < columns; column += 1) {
-      const variant = (row * 7 + column * 5 + width + height) % 4;
-      const rockX = x + sideInset + column * rockWidth - (column > 0 ? 1 : 0);
-      const actualWidth = Math.min(rockWidth + 2, x + width - rockX);
-      const crown = topRow ? variant % 3 : 0;
-      fillRect(context, "#343238", rockX + 1, rockY - crown, actualWidth - 1, rockHeight + crown);
-      fillRect(context, "#555052", rockX, rockY + 2 - crown, actualWidth, Math.max(2, rockHeight - 3 + crown));
-      fillRect(context, variant % 2 ? "#70665e" : "#665f59", rockX + 2, rockY + 1 - crown, Math.max(2, actualWidth - 4), Math.max(3, rockHeight - 6));
-      fillRect(context, "#9d8c72", rockX + 3, rockY + 2 - crown, Math.max(2, Math.floor(actualWidth * .38)), 2);
-      if (rockHeight > 9) {
-        const crackX = rockX + Math.max(4, Math.floor(actualWidth * (variant % 2 ? .62 : .45)));
-        fillRect(context, "#403d40", crackX, rockY + 6, 2, Math.max(3, rockHeight - 9));
-        fillRect(context, "#403d40", crackX - (variant % 2), rockY + rockHeight - 5, 4, 2);
-      }
-    }
-  }
-
-  fillRect(context, "#2d3031", x + 2, y + height - 5, width - 4, 5);
-  fillRect(context, "#6f7756", x + 4, y + height - 7, Math.max(5, Math.floor(width * .24)), 3);
-  fillRect(context, "#8d9365", x + 7, y + height - 8, Math.max(3, Math.floor(width * .12)), 2);
-}
-
-function drawTrafficCone(context: CanvasRenderingContext2D, x: number, y: number, width: number, height: number) {
-  fillRect(context, "rgba(42,31,45,.28)", x + 1, y + height - 1, width, 4);
-  fillRect(context, "#49354c", x, y + height - 4, width, 4);
-  fillRect(context, "#f5d06b", x + 1, y + height - 5, width - 2, 3);
-  fillRect(context, "#ed6b55", x + Math.floor(width / 2) - 2, y + 2, 5, height - 7);
-  fillRect(context, "#ff9a62", x + Math.floor(width / 2) - 1, y, 3, 4);
-  fillRect(context, "#fff0c7", x + Math.floor(width / 2) - 2, y + 6, 5, 2);
-}
-
-function drawSchoolHurdle(context: CanvasRenderingContext2D, prop: WorldProp, x: number, y: number) {
-  const vertical = prop.axis === "horizontal";
-  fillRect(context, "rgba(42,31,45,.25)", x + 2, y + prop.height - 2, prop.width, 4);
-  if (vertical) {
-    fillRect(context, "#564660", x + 3, y, 3, prop.height);
-    fillRect(context, "#564660", x + prop.width - 6, y, 3, prop.height);
-    fillRect(context, "#f5f0d8", x + 2, y + 3, prop.width - 4, 5);
-    fillRect(context, "#e65f65", x + 5, y + 4, 4, 3);
-    fillRect(context, "#e65f65", x + prop.width - 9, y + 4, 4, 3);
-  } else {
-    fillRect(context, "#564660", x, y + 3, prop.width, 3);
-    fillRect(context, "#564660", x, y + prop.height - 6, prop.width, 3);
-    fillRect(context, "#f5f0d8", x + 3, y + 2, 5, prop.height - 4);
-    fillRect(context, "#e65f65", x + 4, y + 5, 3, 4);
-    fillRect(context, "#e65f65", x + 4, y + prop.height - 9, 3, 4);
-  }
-}
-
-function drawSpaceCrate(context: CanvasRenderingContext2D, x: number, y: number, width: number, height: number) {
-  fillRect(context, "rgba(10,17,38,.35)", x + 2, y + height - 1, width, 4);
-  fillRect(context, "#202b4b", x, y, width, height);
-  fillRect(context, "#536989", x + 2, y + 2, width - 4, height - 4);
-  fillRect(context, "#263957", x + 5, y + 5, width - 10, height - 10);
-  fillRect(context, "#78e5ed", x + 3, y + 3, 3, 3);
-  fillRect(context, "#ffcf62", x + width - 6, y + height - 6, 3, 3);
-  fillRect(context, "#8fa6c6", x + Math.floor(width / 2) - 1, y + 2, 2, height - 4);
-}
-
-function drawSpacePylon(context: CanvasRenderingContext2D, prop: WorldProp, x: number, y: number) {
-  const vertical = prop.axis === "horizontal";
-  fillRect(context, "rgba(10,17,38,.35)", x + 1, y + prop.height - 1, prop.width, 4);
-  fillRect(context, "#202b4b", x, y, prop.width, prop.height);
-  fillRect(context, "#506582", x + 2, y + 2, prop.width - 4, prop.height - 4);
-  if (vertical) {
-    fillRect(context, "#ff5f9d", x + 4, y + 3, prop.width - 8, prop.height - 6);
-    fillRect(context, "#8cf5f1", x + 5, y + 5, prop.width - 10, prop.height - 10);
-  } else {
-    fillRect(context, "#ff5f9d", x + 3, y + 4, prop.width - 6, prop.height - 8);
-    fillRect(context, "#8cf5f1", x + 5, y + 5, prop.width - 10, prop.height - 10);
-  }
-  fillRect(context, "#f4f6ff", x + Math.floor(prop.width / 2) - 1, y + 4, 2, prop.height - 8);
-}
-
-function drawRollingRock(context: CanvasRenderingContext2D, rock: RollingRock, cameraX: number, cameraY: number) {
-  const x = Math.round(rock.x - cameraX);
-  const y = Math.round(rock.y - cameraY);
-  const radius = Math.round(rock.radius);
-  if (x < -radius * 2 || x > VIEW_WIDTH + radius * 2 || y < -radius * 2 || y > VIEW_HEIGHT + radius * 2) return;
-  fillRect(context, "rgba(27,22,27,.28)", x - radius, y + radius - 2, radius * 2, 5);
-  context.save();
-  context.translate(x, y);
-  context.rotate(rock.angle);
-  fillRect(context, "#343039", -radius + 2, -radius, radius * 2 - 4, radius * 2);
-  fillRect(context, "#343039", -radius, -radius + 3, radius * 2, radius * 2 - 6);
-  fillRect(context, "#655b57", -radius + 2, -radius + 2, radius * 2 - 5, radius * 2 - 5);
-  fillRect(context, "#8a7968", -radius + 5, -radius + 3, radius - 1, 5);
-  fillRect(context, "#4a4447", 1, -1, radius - 3, 4);
-  fillRect(context, "#b29a77", -radius + 4, 4, 5, 3);
-  fillRect(context, "#302e36", -2, -radius + 3, 3, 8);
-  context.restore();
-}
-
-function drawProp(context: CanvasRenderingContext2D, prop: WorldProp, cameraX: number, cameraY: number) {
-  const x = Math.floor(prop.x - cameraX);
-  const y = Math.floor(prop.y - cameraY);
-  if (x > VIEW_WIDTH + 50 || y > VIEW_HEIGHT + 50 || x + prop.width < -50 || y + prop.height < -50) return;
-  if (prop.kind === "vending") drawVending(context, x, y);
-  if (prop.kind === "bench") drawBench(context, x, y);
-  if (prop.kind === "crate") drawCrate(context, x, y);
-  if (prop.kind === "plant") drawPlant(context, x, y);
-  if (prop.kind === "table") drawTable(context, x, y);
-  if (prop.kind === "sofa") drawSofa(context, x, y);
-  if (prop.kind === "lamp") drawLamp(context, x, y);
-  if (prop.kind === "mailbox") drawMailbox(context, x, y);
-  if (prop.kind === "arcade") drawArcade(context, x, y);
-  if (prop.kind === "rockwall") drawRockWall(context, x, y, prop.width, prop.height);
-  if (prop.kind === "traffic-cone") drawTrafficCone(context, x, y, prop.width, prop.height);
-  if (prop.kind === "school-hurdle") drawSchoolHurdle(context, prop, x, y);
-  if (prop.kind === "space-crate") drawSpaceCrate(context, x, y, prop.width, prop.height);
-  if (prop.kind === "space-pylon") drawSpacePylon(context, prop, x, y);
-}
-
-function drawPit(context: CanvasRenderingContext2D, pit: Pit, cameraX: number, cameraY: number, time: number) {
-  const x = pit.x - cameraX;
-  const y = pit.y - cameraY;
-  fillRect(context, "#9e4c59", x - 2, y - 2, pit.width + 4, pit.height + 4);
-  if (!pit.active) {
-    fillRect(context, "#7f5665", x, y, pit.width, pit.height);
-    for (let index = 4; index < pit.width; index += 8) fillRect(context, "#b37a77", x + index, y + 2, 2, pit.height - 4);
-    fillRect(context, "#f0b26e", x + 2, y + 2, pit.width - 4, 2);
-    return;
-  }
-  fillRect(context, "#392d4a", x, y, pit.width, pit.height);
-  fillRect(context, "#17182e", x + 3, y + 4, pit.width - 6, pit.height - 7);
-  fillRect(context, "#5b3f5b", x + 5, y + 5, pit.width - 10, 3);
-  const spark = Math.floor(time / 120) % 3;
-  fillRect(context, "#ec7769", x + 4 + spark * 6, y + pit.height - 7, 3, 2);
-  fillRect(context, "#f4c562", x + pit.width - 8, y + 8 + spark * 4, 2, 3);
-}
-
-function drawJumpPad(context: CanvasRenderingContext2D, pad: typeof jumpPads[number], cameraX: number, cameraY: number) {
-  const x = pad.x - cameraX;
-  const y = pad.y - cameraY;
-  fillRect(context, "#403b63", x - 2, y + 5, pad.width + 4, pad.height - 3);
-  fillRect(context, "#4c77b8", x, y + 2, pad.width, pad.height - 6);
-  fillRect(context, "#78cdea", x + 3, y + 5, pad.width - 6, 5);
-  for (const offset of [5, 20]) {
-    fillRect(context, "#fff0a7", x + offset + 6, y + 11, 9, 3);
-    fillRect(context, "#fff0a7", x + offset + 3, y + 8, 4, 9);
-    fillRect(context, "#fff0a7", x + offset, y + 11, 4, 3);
-    fillRect(context, "#e7a85e", x + offset + 6, y + 14, 9, 2);
-  }
-  fillRect(context, "#293a68", x + 3, y + 21, pad.width - 6, 2);
-}
-
-function drawCheckpoint(context: CanvasRenderingContext2D, checkpoint: typeof checkpoints[number], cameraX: number, cameraY: number, active: boolean, label: string) {
-  const x = checkpoint.x - cameraX;
-  const y = checkpoint.y - cameraY;
-  const color = active ? "#f7d366" : "#a58ca4";
-  fillRect(context, "#4a3d58", x + 31, y + 12, 4, 41);
-  fillRect(context, color, x + 35, y + 12, 18, 11);
-  fillRect(context, active ? "#fff0af" : "#d6bfd2", x + 38, y + 15, 4, 4);
-  fillRect(context, "#4a3d58", x + 27, y + 51, 12, 3);
-  context.fillStyle = active ? "#fff5c1" : "#dfc7dc";
-  context.font = "bold 7px monospace";
-  context.fillText(label, Math.round(x + 42), Math.round(y + 21));
-}
-
-function drawSpinner(context: CanvasRenderingContext2D, spinner: Spinner, cameraX: number, cameraY: number) {
-  const x = spinner.x - cameraX;
-  const y = spinner.y - cameraY;
-  const dx = Math.cos(spinner.angle) * spinner.radius;
-  const dy = Math.sin(spinner.angle) * spinner.radius;
-  context.save();
-  context.translate(Math.round(x), Math.round(y));
-  context.rotate(spinner.angle);
-  fillRect(context, "#673f5a", -spinner.radius - 2, -4, spinner.radius * 2 + 4, 8);
-  fillRect(context, "#f1c55f", -spinner.radius, -2, spinner.radius * 2, 4);
-  fillRect(context, "#f37e72", -spinner.radius - 3, -5, 8, 10);
-  fillRect(context, "#f37e72", spinner.radius - 5, -5, 8, 10);
-  context.restore();
-  fillRect(context, "#40364e", x - 7, y - 4, 14, 11);
-  fillRect(context, "#9e8db4", x - 4, y - 8, 8, 12);
-  fillRect(context, "#f8dd7d", x - 2, y - 5, 4, 5);
-  fillRect(context, "#f1c55f", x + dx - 2, y + dy - 2, 4, 4);
 }
 
 function drawHealthPips(context: CanvasRenderingContext2D, left: number, y: number, health: number) {
@@ -702,18 +438,18 @@ function updatePlayerSkillLabel(left: number, y: number) {
 }
 
 function updateRunnerLabels(runner: LabelledRunner, left: number, y: number) {
-  let labels = botWorldLabels.get(runner.id);
+  let labels = runnerWorldLabels.get(runner.id);
   if (!labels) {
     const container = document.createElement("div");
     const name = document.createElement("span");
     const skill = document.createElement("span");
     container.className = "world-label-stack";
-    name.className = "world-label bot-name-label";
-    skill.className = "world-label bot-skill-label";
+    name.className = "world-label runner-name-label";
+    skill.className = "world-label runner-skill-label";
     container.append(name, skill);
     elements.worldLabelLayer.append(container);
     labels = { container, name, skill };
-    botWorldLabels.set(runner.id, labels);
+    runnerWorldLabels.set(runner.id, labels);
   }
   labels.name.textContent = runner.name;
   const status = "skillCooldownUntil" in runner
@@ -723,17 +459,17 @@ function updateRunnerLabels(runner: LabelledRunner, left: number, y: number) {
   placeWorldLabel(labels.container, left, y);
 }
 
-function removeRunnerLabels(id: string | number) {
-  const labels = botWorldLabels.get(id);
+function removeRunnerLabels(id: string) {
+  const labels = runnerWorldLabels.get(id);
   if (!labels) return;
   labels.container.remove();
-  botWorldLabels.delete(id);
+  runnerWorldLabels.delete(id);
 }
 
 function resetWorldLabels() {
   elements.playerSkillLabel.classList.add("hidden");
-  for (const labels of botWorldLabels.values()) labels.container.remove();
-  botWorldLabels.clear();
+  for (const labels of runnerWorldLabels.values()) labels.container.remove();
+  runnerWorldLabels.clear();
 }
 
 function getOwnedCloneCount() {
@@ -741,7 +477,7 @@ function getOwnedCloneCount() {
   return multiplayerActive ? clones.filter((clone) => clone.ownerId === playerId).length : clones.length;
 }
 
-function getGrappledPosition(id: string | number | undefined, fallbackX: number, fallbackY: number, now: number) {
+function getGrappledPosition(id: string | undefined, fallbackX: number, fallbackY: number, now: number) {
   const effect = grappleEffects.find((candidate) => candidate.targetId !== undefined && candidate.targetId === id && candidate.until > now);
   if (!effect || effect.targetStartX === undefined || effect.targetStartY === undefined || effect.targetEndX === undefined || effect.targetEndY === undefined) return { x: fallbackX, y: fallbackY };
   const progress = Math.max(0, Math.min(1, (now - effect.startedAt) / 520));
@@ -754,7 +490,7 @@ function getGrappledPosition(id: string | number | undefined, fallbackX: number,
   };
 }
 
-function getPushedPosition(id: string | number | undefined, fallbackX: number, fallbackY: number, now: number) {
+function getPushedPosition(id: string | undefined, fallbackX: number, fallbackY: number, now: number) {
   for (let index = pushEffects.length - 1; index >= 0; index -= 1) {
     const effect = pushEffects[index];
     if (effect.until <= now) {
@@ -864,7 +600,7 @@ function drawRockSquashedPerson(
 }
 
 function drawPlayer(context: CanvasRenderingContext2D, cameraX: number, cameraY: number, time: number) {
-  const playerId = multiplayerActive ? getLocalNetworkPlayerId() : LOCAL_GRAPPLE_ID;
+  const playerId = getLocalNetworkPlayerId();
   const grappledPosition = getGrappledPosition(playerId, player.x, player.y, time);
   const position = getPushedPosition(playerId, grappledPosition.x, grappledPosition.y, time);
   const baseX = position.x - cameraX;
@@ -1124,10 +860,6 @@ function blockedByGiantRunner(x: number, y: number) {
 }
 
 function canStandAt(x: number, y: number) {
-  if (gameMode === "practice") {
-    if (x - 5 < PRACTICE_ARENA.left || x + 5 > PRACTICE_ARENA.right || y - 5 < PRACTICE_ARENA.top || y + 7 > PRACTICE_ARENA.bottom) return false;
-    return !clones.some((clone) => runnersOverlap(x, y, clone.x, clone.y));
-  }
   if (x - 5 < 0 || x + 5 > currentMap.worldWidth || y - 5 < 0 || y + 7 > currentMap.worldHeight) return false;
   if (currentMap.trackBoundary !== "fall" && !canStandOnMap(currentMap, x, y)) return false;
   if (blockedByGiantRunner(x, y)) return false;
@@ -1154,24 +886,6 @@ function getAimVector() {
   return length > 2 ? { x: dx / length, y: dy / length } : { x: fallback[0], y: fallback[1] };
 }
 
-function getPracticeTargetInAim(maxDistance = GRAB_RANGE, hitRadius = GRAB_HIT_RADIUS) {
-  const aimVector = getAimVector();
-  let candidate: TestBot | undefined;
-  let candidateForwardDistance = Number.POSITIVE_INFINITY;
-  for (const bot of testBots) {
-    const dx = bot.x - player.x;
-    const dy = bot.y - player.y;
-    const forwardDistance = dx * aimVector.x + dy * aimVector.y;
-    const lateralDistance = Math.abs(dx * aimVector.y - dy * aimVector.x);
-    if (!isTargetOnAimLine(bot.skill, forwardDistance, lateralDistance, maxDistance, hitRadius)) continue;
-    if (forwardDistance < candidateForwardDistance) {
-      candidate = bot;
-      candidateForwardDistance = forwardDistance;
-    }
-  }
-  return candidate;
-}
-
 function isLocalActionLocked(now: number) {
   if (player.fallingUntil > 0 || player.flattenedUntil > 0 || player.airUntil > now) return true;
   if (grappleLockUntil > now || pushLockUntil > now) return true;
@@ -1180,21 +894,11 @@ function isLocalActionLocked(now: number) {
 }
 
 function canUseSkill(id: SkillId, now: number) {
-  if (matchFinished || isLocalActionLocked(now)) return false;
+  if (!multiplayerActive || matchFinished || isLocalActionLocked(now)) return false;
   if (isPassiveSkill(id)) return false;
   if (id === "dash") return dashCharges > 0 && now >= skillReadyAt.dash;
   if (id === "clone") return getOwnedCloneCount() < CLONE_LIMIT && now >= skillReadyAt.clone;
   return now >= skillReadyAt[id];
-}
-
-function applySlow(centerX: number, centerY: number, radius: number, now: number) {
-  let count = 0;
-  for (const bot of testBots) {
-    if (!isTargetWithinScaledRange(bot.skill, Math.hypot(bot.x - centerX, bot.y - centerY), radius)) continue;
-    bot.slowUntil = Math.max(bot.slowUntil, now + 3600);
-    count += 1;
-  }
-  return count;
 }
 
 function useSkill(id: SkillId, now = performance.now()) {
@@ -1202,170 +906,35 @@ function useSkill(id: SkillId, now = performance.now()) {
   audio.play("skill");
   const aimVector = getAimVector();
 
-  if (multiplayerActive) {
-    if (id === "dash") {
-      dashCharges -= 1;
-      skillReadyAt.dash = now + 170;
-      player.dashVelocityX = aimVector.x * 280;
-      player.dashVelocityY = aimVector.y * 280;
-      player.dashUntil = now + 165;
-      if (dashCharges === 0) dashRechargeAt = now + DASH_RECHARGE_DURATION;
-    } else if (id === "run") {
-      skillReadyAt.run = now + 9000;
-      runUntil = now + RUN_DURATION;
-    } else if (id === "push") skillReadyAt.push = now + 2600;
-    else if (id === "grab") {
-      skillReadyAt.grab = now + 3800;
-      grappleLockUntil = now + 520;
-    }
-    else if (id === "clone") skillReadyAt.clone = now + CLONE_COOLDOWN;
-    else if (id === "slow") {
-      skillReadyAt.slow = now + 4600;
-      projectiles.push({ kind: "slow", owner: "player", sourceId: getLocalNetworkPlayerId(), visualOnly: true, x: player.x, y: player.y - 2, velocityX: aimVector.x * 265, velocityY: aimVector.y * 265, until: now + 760, radius: 72 });
-    } else {
-      skillReadyAt.sleep = now + 2000;
-      projectiles.push({ kind: "sleep", owner: "player", sourceId: getLocalNetworkPlayerId(), visualOnly: true, x: player.x, y: player.y - 2, velocityX: aimVector.x * 345, velocityY: aimVector.y * 345, until: now + 680, radius: 0 });
-    }
-    aim.pulseX = player.x;
-    aim.pulseY = player.y;
-    aim.pulseUntil = now + 220;
-    socket.emit("combat:skill", { skill: id, dx: aimVector.x, dy: aimVector.y });
-    showToast(`${skillLabels[id]} 사용!`);
-    return true;
-  }
-
-  if (id === "push") {
-    skillReadyAt.push = now + 2600;
-    let count = 0;
-    for (const bot of testBots) {
-      const dx = bot.x - player.x;
-      const dy = bot.y - player.y;
-      const distance = Math.hypot(dx, dy);
-      if (!isTargetWithinScaledRange(bot.skill, distance, 72) || distance === 0) continue;
-      bot.knockbackX = dx / distance * 300;
-      bot.knockbackY = dy / distance * 300;
-      count += 1;
-    }
-    aim.pulseX = player.x;
-    aim.pulseY = player.y;
-    aim.pulseUntil = now + 300;
-    showToast(count ? `${count}명을 밀쳐냈다!` : "밀칠 대상이 근처에 없다.");
-  }
-
   if (id === "dash") {
     dashCharges -= 1;
     skillReadyAt.dash = now + 170;
-    player.dashVelocityX = aimVector.x * 510;
-    player.dashVelocityY = aimVector.y * 510;
+    player.dashVelocityX = aimVector.x * 280;
+    player.dashVelocityY = aimVector.y * 280;
     player.dashUntil = now + 165;
     if (dashCharges === 0) dashRechargeAt = now + DASH_RECHARGE_DURATION;
-    showToast(`돌진! (${dashCharges}/3)`);
-  }
-
-  if (id === "run") {
+  } else if (id === "run") {
     skillReadyAt.run = now + 9000;
     runUntil = now + RUN_DURATION;
-    showToast("질주 모드! 계속 달릴 수 있다.");
-  }
-
-  if (id === "grab") {
+  } else if (id === "push") skillReadyAt.push = now + 2600;
+  else if (id === "grab") {
     skillReadyAt.grab = now + 3800;
     grappleLockUntil = now + 520;
-    const target = getPracticeTargetInAim();
-    const hookX = target ? target.x : player.x + aimVector.x * GRAB_RANGE;
-    const hookY = target ? target.y : player.y + aimVector.y * GRAB_RANGE;
-    if (target) {
-      const targetStartX = target.x;
-      const targetStartY = target.y;
-      const pullX = player.x + aimVector.x * 34;
-      const pullY = player.y + aimVector.y * 34;
-      if (gameMode === "practice") {
-        target.x = Math.max(PRACTICE_ARENA.left + 12, Math.min(PRACTICE_ARENA.right - 12, pullX));
-        target.y = Math.max(PRACTICE_ARENA.top + 12, Math.min(PRACTICE_ARENA.bottom - 12, pullY));
-      } else if (isMapTrackPoint(currentMap, pullX, pullY)) {
-        target.x = pullX;
-        target.y = pullY;
-      }
-      target.knockbackX = 0;
-      target.knockbackY = 0;
-      grappleEffects.splice(0, grappleEffects.length, ...grappleEffects.filter((effect) => effect.targetId !== target.id));
-      grappleEffects.push({
-        sourceId: LOCAL_GRAPPLE_ID,
-        targetId: target.id,
-        sourceX: player.x,
-        sourceY: player.y,
-        hookX,
-        hookY,
-        targetStartX,
-        targetStartY,
-        targetEndX: target.x,
-        targetEndY: target.y,
-        startedAt: now,
-        until: now + 520,
-      });
-      showToast(`${target.name}을(를) 앞으로 끌어왔다!`);
-    } else {
-      grappleEffects.push({
-        sourceId: LOCAL_GRAPPLE_ID,
-        sourceX: player.x,
-        sourceY: player.y,
-        hookX,
-        hookY,
-        startedAt: now,
-        until: now + 520,
-      });
-      showToast("그랩 발사! 조준선에 맞은 대상이 없다.");
-    }
   }
-
-  if (id === "clone") {
-    const rawX = player.x + aimVector.x * 32;
-    const rawY = player.y + aimVector.y * 32;
-    let spawnX = gameMode === "practice" ? Math.max(PRACTICE_ARENA.left + 12, Math.min(PRACTICE_ARENA.right - 12, rawX)) : rawX;
-    let spawnY = gameMode === "practice" ? Math.max(PRACTICE_ARENA.top + 12, Math.min(PRACTICE_ARENA.bottom - 12, rawY)) : rawY;
-    if (gameMode === "track" && !canStandAt(spawnX, spawnY)) {
-      let found = false;
-      for (let distance = 30; distance >= 18; distance -= 2) {
-        const candidateX = player.x + aimVector.x * distance;
-        const candidateY = player.y + aimVector.y * distance;
-        if (!canStandAt(candidateX, candidateY)) continue;
-        spawnX = candidateX;
-        spawnY = candidateY;
-        found = true;
-        break;
-      }
-      if (!found) {
-        showToast("분신을 놓을 수 있는 길이 없다.");
-        return false;
-      }
-    }
-    skillReadyAt.clone = now + CLONE_COOLDOWN;
-    const clone = { x: spawnX, y: spawnY, direction: player.direction, until: now + CLONE_DURATION };
-    clones.push(clone);
-    for (const bot of testBots) nudgeBotFromNewClone(bot, clone, aimVector.x, aimVector.y);
-    showToast(`분신 배치! (${clones.length}/${CLONE_LIMIT})`);
-  }
-
-  if (id === "slow") {
+  else if (id === "clone") skillReadyAt.clone = now + CLONE_COOLDOWN;
+  else if (id === "slow") {
     skillReadyAt.slow = now + 4600;
-    projectiles.push({ kind: "slow", owner: "player", x: player.x, y: player.y - 2, velocityX: aimVector.x * 265, velocityY: aimVector.y * 265, until: now + 760, radius: 72 });
-    showToast("슬로우탄 발사!");
-  }
-
-  if (id === "sleep") {
+    projectiles.push({ kind: "slow", owner: "player", sourceId: getLocalNetworkPlayerId(), visualOnly: true, x: player.x, y: player.y - 2, velocityX: aimVector.x * 265, velocityY: aimVector.y * 265, until: now + 760, radius: 72 });
+  } else {
     skillReadyAt.sleep = now + 2000;
-    projectiles.push({ kind: "sleep", owner: "player", x: player.x, y: player.y - 2, velocityX: aimVector.x * 345, velocityY: aimVector.y * 345, until: now + 680, radius: 0 });
-    showToast("수면총 발사!");
+    projectiles.push({ kind: "sleep", owner: "player", sourceId: getLocalNetworkPlayerId(), visualOnly: true, x: player.x, y: player.y - 2, velocityX: aimVector.x * 345, velocityY: aimVector.y * 345, until: now + 680, radius: 0 });
   }
+  aim.pulseX = player.x;
+  aim.pulseY = player.y;
+  aim.pulseUntil = now + 220;
+  socket.emit(CLIENT_EVENTS.combatSkill, { skill: id, dx: aimVector.x, dy: aimVector.y });
+  showToast(`${skillLabels[id]} 사용!`);
   return true;
-}
-
-function rollEquippedSkill(now: number, announce = true) {
-  equippedSkill = pickNextSkill(roomConfig.enabledSkills, equippedSkill);
-  skillReadyAt[equippedSkill] = now;
-  if (!announce) return;
-  if (isPassiveSkill(equippedSkill)) showToast(`새 자동 스킬: ${skillLabels[equippedSkill]}! 즉시 적용됩니다.`);
-  else showToast(`새 스킬: ${skillLabels[equippedSkill]}! 우클릭으로 사용하세요.`);
 }
 
 function refillPlayerAmmo() {
@@ -1385,180 +954,7 @@ function fireBasicShot(now: number) {
   player.ammo -= 1;
   player.shotReadyAt = now + 210;
   projectiles.push({ kind: "bullet", owner: "player", x: player.x + aimVector.x * 8, y: player.y + aimVector.y * 2, velocityX: aimVector.x * 430, velocityY: aimVector.y * 430, until: now + 620, radius: 0 });
-  if (multiplayerActive) socket.emit("combat:shoot", { dx: aimVector.x, dy: aimVector.y });
-}
-
-function respawnBot(bot: TestBot, now: number) {
-  const point = currentMap.respawnPoints[Math.min(bot.checkpoint, currentMap.respawnPoints.length - 1)];
-  bot.x = point.x + (bot.id % 2 ? 10 : -10);
-  bot.y = point.y + (bot.id % 3 - 1) * 9;
-  bot.health = 5;
-  bot.knockbackX = 0;
-  bot.knockbackY = 0;
-  bot.sleepUntil = now + 250;
-}
-
-function damageBot(bot: TestBot, now: number) {
-  if (isDamageImmune(bot.skill)) return;
-  bot.health -= 1;
-  if (bot.health <= 0) {
-    respawnBot(bot, now);
-    showToast(`${bot.name} 처치! 체크포인트에서 부활.`);
-  } else {
-    bot.knockbackX += (bot.x - player.x) * 4;
-    bot.knockbackY += (bot.y - player.y) * 4;
-  }
-}
-
-function damagePlayer(now: number) {
-  if (isDamageImmune(equippedSkill)) return;
-  player.health -= 1;
-  if (player.health <= 0) {
-    player.health = 5;
-    respawnAtCheckpoint("라이프가 모두 소진됐다! 체크포인트에서 부활.", now);
-  } else {
-    showToast(`피격! 라이프 ${player.health}/5`);
-  }
-}
-
-function canBotStand(bot: TestBot, x: number, y: number) {
-  if (gameMode === "track") {
-    if (x - 5 < 0 || x + 5 > currentMap.worldWidth || y - 5 < 0 || y + 7 > currentMap.worldHeight) return false;
-    if (currentMap.trackBoundary !== "fall" && !canStandOnMap(currentMap, x, y)) return false;
-    if (
-      !isObstacleImmune(bot.skill)
-      && [...props, ...mapObstacles].some((prop) => prop.solid && runnerTouchesObstacle(x, y, prop))
-    ) return false;
-    return !clones.some((clone) => runnersOverlap(x, y, clone.x, clone.y));
-  }
-  if (x - 6 < PRACTICE_ARENA.left || x + 6 > PRACTICE_ARENA.right || y - 6 < PRACTICE_ARENA.top || y + 8 > PRACTICE_ARENA.bottom) return false;
-  return !clones.some((clone) => runnersOverlap(x, y, clone.x, clone.y));
-}
-
-function nudgeBotFromNewClone(bot: TestBot, clone: Clone, fallbackX: number, fallbackY: number) {
-  const deltaX = bot.x - clone.x;
-  const deltaY = bot.y - clone.y;
-  if (!runnersOverlap(bot.x, bot.y, clone.x, clone.y)) return;
-  const length = Math.hypot(deltaX, deltaY);
-  const directionX = length > .01 ? deltaX / length : fallbackX;
-  const directionY = length > .01 ? deltaY / length : fallbackY;
-  for (let distance = 20; distance <= 48; distance += 4) {
-    const x = clone.x + directionX * distance;
-    const y = clone.y + directionY * distance;
-    if (!canBotStand(bot, x, y)) continue;
-    bot.x = x;
-    bot.y = y;
-    bot.knockbackX = 0;
-    bot.knockbackY = 0;
-    return;
-  }
-}
-
-function updatePracticeBots(now: number, dt: number) {
-  for (let index = clones.length - 1; index >= 0; index -= 1) if (clones[index].until <= now) clones.splice(index, 1);
-  if (dashCharges === 0 && now >= dashRechargeAt) {
-    dashCharges = 3;
-    showToast("돌진 3회가 다시 충전됐다!");
-  }
-  for (const bot of testBots) {
-    if (bot.sleepUntil > now) continue;
-    if (bot.nextTurnAt <= now) {
-      const angle = Math.random() * Math.PI * 2;
-      bot.moveX = Math.cos(angle);
-      bot.moveY = Math.sin(angle);
-      bot.nextTurnAt = now + 900 + Math.random() * 1500;
-      bot.direction = Math.abs(bot.moveX) > Math.abs(bot.moveY) ? (bot.moveX < 0 ? "left" : "right") : (bot.moveY < 0 ? "up" : "down");
-    }
-    const speed = bot.slowUntil > now ? 19 : 48;
-    const candidateX = bot.x + bot.moveX * speed * dt;
-    const candidateY = bot.y + bot.moveY * speed * dt;
-    if (canBotStand(bot, candidateX, bot.y)) bot.x = candidateX;
-    else bot.nextTurnAt = 0;
-    if (canBotStand(bot, bot.x, candidateY)) bot.y = candidateY;
-    else bot.nextTurnAt = 0;
-    if (Math.abs(bot.knockbackX) > 2 || Math.abs(bot.knockbackY) > 2) {
-      const knockX = bot.x + bot.knockbackX * dt;
-      const knockY = bot.y + bot.knockbackY * dt;
-      if (canBotStand(bot, knockX, bot.y)) bot.x = knockX;
-      else bot.knockbackX = 0;
-      if (canBotStand(bot, bot.x, knockY)) bot.y = knockY;
-      else bot.knockbackY = 0;
-      bot.knockbackX *= Math.pow(.02, dt);
-      bot.knockbackY *= Math.pow(.02, dt);
-    }
-    bot.walking += dt * (bot.slowUntil > now ? 4 : 9);
-  }
-}
-
-function updateTrackBots(now: number, dt: number) {
-  for (let index = clones.length - 1; index >= 0; index -= 1) if (clones[index].until <= now) clones.splice(index, 1);
-  if (dashCharges === 0 && now >= dashRechargeAt) dashCharges = 3;
-  const route = currentMap.courseType === "linear"
-    ? [
-        ...currentMap.checkpoints.map((checkpoint) => ({ x: checkpoint.spawnX, y: checkpoint.spawnY })),
-        {
-          x: currentMap.finishGate.x + currentMap.finishGate.width / 2,
-          y: currentMap.finishGate.y + currentMap.finishGate.height / 2,
-        },
-      ]
-    : [
-        currentMap.respawnPoints[1],
-        currentMap.respawnPoints[2],
-        currentMap.respawnPoints[3],
-        currentMap.respawnPoints[0],
-      ];
-  for (const bot of testBots) {
-    if (bot.sleepUntil > now) continue;
-    if (currentMap.trackBoundary === "fall" && !isVoidFallImmune(bot.skill) && !canStandOnMap(currentMap, bot.x, bot.y)) {
-      respawnBot(bot, now);
-      showToast(`${bot.name} 우주 공간으로 추락!`);
-      continue;
-    }
-    const target = route[bot.routeIndex];
-    const dx = target.x - bot.x;
-    const dy = target.y - bot.y;
-    const distance = Math.hypot(dx, dy);
-    const speed = bot.slowUntil > now ? 29 : 72;
-    if (distance < 12) {
-      if (bot.routeIndex === route.length - 1) {
-        bot.lap += 1;
-        bot.checkpoint = 0;
-        if (bot.lap >= roomConfig.lapLimit) {
-          finishMatch(bot.name);
-          return;
-        }
-        if (currentMap.courseType === "linear") {
-          bot.x = currentMap.startPoint.x + (bot.id % 2 ? 10 : -10);
-          bot.y = currentMap.startPoint.y + (bot.id % 3 - 1) * 9;
-          bot.knockbackX = 0;
-          bot.knockbackY = 0;
-        }
-      } else bot.checkpoint = bot.routeIndex + 1;
-      bot.routeIndex = (bot.routeIndex + 1) % route.length;
-      continue;
-    }
-    const moveX = dx / distance;
-    const moveY = dy / distance;
-    bot.direction = Math.abs(moveX) > Math.abs(moveY) ? (moveX < 0 ? "left" : "right") : (moveY < 0 ? "up" : "down");
-    const candidateX = bot.x + moveX * speed * dt;
-    const candidateY = bot.y + moveY * speed * dt;
-    if (canBotStand(bot, candidateX, bot.y)) bot.x = candidateX;
-    if (canBotStand(bot, bot.x, candidateY)) bot.y = candidateY;
-    if (Math.abs(bot.knockbackX) > 2 || Math.abs(bot.knockbackY) > 2) {
-      if (canBotStand(bot, bot.x + bot.knockbackX * dt, bot.y)) bot.x += bot.knockbackX * dt;
-      if (canBotStand(bot, bot.x, bot.y + bot.knockbackY * dt)) bot.y += bot.knockbackY * dt;
-      bot.knockbackX *= Math.pow(.02, dt);
-      bot.knockbackY *= Math.pow(.02, dt);
-    }
-    const playerDistance = Math.hypot(player.x - bot.x, player.y - bot.y);
-    if (playerDistance < 165 && now >= bot.shotReadyAt) {
-      const bulletX = (player.x - bot.x) / Math.max(1, playerDistance);
-      const bulletY = (player.y - bot.y) / Math.max(1, playerDistance);
-      projectiles.push({ kind: "bullet", owner: "bot", sourceId: bot.id, x: bot.x + bulletX * 8, y: bot.y + bulletY * 2, velocityX: bulletX * 300, velocityY: bulletY * 300, until: now + 650, radius: 0 });
-      bot.shotReadyAt = now + 2600 + Math.random() * 900;
-    }
-    bot.walking += dt * (bot.slowUntil > now ? 5 : 10);
-  }
+  if (multiplayerActive) socket.emit(CLIENT_EVENTS.combatShoot, { dx: aimVector.x, dy: aimVector.y });
 }
 
 function updateProjectiles(now: number, dt: number) {
@@ -1566,34 +962,8 @@ function updateProjectiles(now: number, dt: number) {
     const projectile = projectiles[index];
     projectile.x += projectile.velocityX * dt;
     projectile.y += projectile.velocityY * dt;
-    const target = projectile.owner === "player"
-      ? testBots.find((bot) => Math.hypot(bot.x - projectile.x, bot.y - projectile.y) < getSkillHitRadius(bot.skill, 11))
-      : undefined;
-    const playerHit = projectile.owner === "bot"
-      && Math.hypot(player.x - projectile.x, player.y - projectile.y) < getSkillHitRadius(equippedSkill, 11);
-    const outside = gameMode === "practice"
-      ? projectile.x < PRACTICE_ARENA.left || projectile.x > PRACTICE_ARENA.right || projectile.y < PRACTICE_ARENA.top || projectile.y > PRACTICE_ARENA.bottom
-      : projectile.x < 0 || projectile.x > currentMap.worldWidth || projectile.y < 0 || projectile.y > currentMap.worldHeight;
-    const expired = now >= projectile.until || outside;
-    if (projectile.visualOnly) {
-      if (expired) projectiles.splice(index, 1);
-      continue;
-    }
-    if (!target && !playerHit && !expired) continue;
-    if (projectile.kind === "bullet" && target) damageBot(target, now);
-    if (projectile.kind === "bullet" && playerHit) damagePlayer(now);
-    if (projectile.kind === "slow") {
-      slowImpacts.push({ x: projectile.x, y: projectile.y, startedAt: now, until: now + 520 });
-      const count = applySlow(projectile.x, projectile.y, projectile.radius, now);
-      showToast(count ? `${count}명이 느려졌다!` : "슬로우탄이 빈 곳에서 터졌다.");
-    }
-    if (projectile.kind === "sleep" && target) {
-      target.sleepUntil = now + 2000;
-      target.knockbackX = 0;
-      target.knockbackY = 0;
-      showToast(`${target.name}이(가) 2초간 잠들었다!`);
-    }
-    projectiles.splice(index, 1);
+    const outside = projectile.x < 0 || projectile.x > currentMap.worldWidth || projectile.y < 0 || projectile.y > currentMap.worldHeight;
+    if (now >= projectile.until || outside) projectiles.splice(index, 1);
   }
 }
 
@@ -1666,44 +1036,6 @@ function respawnAtCheckpoint(message: string, now: number) {
   showToast(message);
 }
 
-function beginPitFall(pit: Pit, now: number) {
-  audio.play("pit");
-  player.fallingStartedAt = now;
-  player.fallingUntil = now + 520;
-  player.fallKind = "pit";
-  player.fallTargetX = pit.x + pit.width / 2;
-  player.fallTargetY = pit.y + pit.height / 2;
-  player.knockbackX = 0;
-  player.knockbackY = 0;
-  player.airUntil = 0;
-  player.flattenedUntil = 0;
-  player.flattenedStartedAt = 0;
-  player.hitUntil = now + 600;
-  showToast("구덩이에 빨려 들어간다!");
-}
-
-function beginVoidFall(now: number) {
-  audio.play("pit");
-  player.fallingStartedAt = now;
-  player.fallingUntil = now + 520;
-  player.fallKind = "void";
-  const target = getTrackFallTarget(player.x, player.y);
-  player.fallTargetX = target.x;
-  player.fallTargetY = target.y;
-  player.knockbackX = 0;
-  player.knockbackY = 0;
-  player.airUntil = 0;
-  player.flattenedUntil = 0;
-  player.flattenedStartedAt = 0;
-  player.dashUntil = 0;
-  player.hitUntil = now + 600;
-  showToast("정거장 밖으로 추락했습니다!");
-}
-
-function isPlayerStandingOnTrack() {
-  return canStandOnMap(currentMap, player.x, player.y);
-}
-
 function updateHazards(now: number, dt: number) {
   for (let index = rollingRocks.length - 1; index >= 0; index -= 1) {
     const rock = rollingRocks[index];
@@ -1715,138 +1047,8 @@ function updateHazards(now: number, dt: number) {
     rock.y += rock.velocityY * dt;
     rock.angle += Math.hypot(rock.velocityX, rock.velocityY) * dt / Math.max(1, rock.radius);
   }
-
-  if (multiplayerActive) {
-    const spinnerElapsed = (networkSpinnerElapsedAtSync + Math.max(0, now - networkSpinnerSyncedAt)) / 1000;
-    for (const spinner of spinners) spinner.angle = spinner.speed * spinnerElapsed;
-  } else {
-    for (const spinner of spinners) spinner.angle += spinner.speed * dt;
-  }
-
-  if (
-    !multiplayerActive
-    && gameMode === "track"
-    && currentMap.trackBoundary === "fall"
-    && player.fallingUntil <= 0
-    && !isVoidFallImmune(equippedSkill)
-    && !isPlayerStandingOnTrack()
-  ) {
-    beginVoidFall(now);
-    return;
-  }
-
-  if (!multiplayerActive && pits.length > 0) {
-    if (warningPitIndex >= 0 && now >= pitOpenAt) {
-      activePitIndex = warningPitIndex;
-      warningPitIndex = -1;
-      pitOpenAt = 0;
-      pits.forEach((pit, index) => {
-        pit.active = index === activePitIndex;
-      });
-      nextPitAt = now + PIT_CYCLE_MIN_DELAY + Math.random() * PIT_CYCLE_RANDOM_DELAY;
-      showToast("구덩이가 열렸다!");
-    } else if (warningPitIndex < 0 && now >= nextPitAt) {
-      let nearestDistance = Number.POSITIVE_INFINITY;
-      warningPitIndex = 0;
-      pits.forEach((pit, index) => {
-        const distance = Math.hypot(player.x - (pit.x + pit.width / 2), player.y - (pit.y + pit.height / 2));
-        if (distance >= nearestDistance) return;
-        nearestDistance = distance;
-        warningPitIndex = index;
-      });
-      activePitIndex = -1;
-      pitOpenAt = now + PIT_WARNING_DURATION;
-      pits.forEach((pit) => {
-        pit.active = false;
-      });
-      showToast("구덩이 경고! 잠시 후 열린다.");
-    }
-
-    if (isGroundHazardImmune(equippedSkill)) return;
-
-    const playerLeft = player.x - 5;
-    const playerTop = player.y - 5;
-    for (const pit of pits) {
-      if (pit.active && now > player.hitUntil && intersects(playerLeft, playerTop, 10, 12, pit, 4)) {
-        beginPitFall(pit, now);
-        return;
-      }
-    }
-
-    for (const pad of jumpPads) {
-      if (now > jumpPadCooldownUntil && intersects(playerLeft, playerTop, 10, 12, pad, 2)) {
-        audio.play("jump");
-        player.knockbackX = pad.pushX;
-        player.knockbackY = pad.pushY;
-        player.airStartedAt = now;
-        player.airUntil = now + 560;
-        player.hitUntil = now + 560;
-        jumpPadCooldownUntil = now + 980;
-        showToast("점프대에 떠올라 뒤로 날아간다!");
-      }
-    }
-  }
-
-  if (multiplayerActive || now <= player.hitUntil || isGroundHazardImmune(equippedSkill)) return;
-  for (const spinner of spinners) {
-    const dx = Math.cos(spinner.angle) * spinner.radius;
-    const dy = Math.sin(spinner.angle) * spinner.radius;
-    if (pointSegmentDistance(player.x, player.y + 2, spinner.x - dx, spinner.y - dy, spinner.x + dx, spinner.y + dy) > 8) continue;
-    const awayX = player.x - spinner.x;
-    const awayY = player.y - spinner.y;
-    const distance = Math.max(1, Math.hypot(awayX, awayY));
-    player.knockbackX = awayX / distance * 250;
-    player.knockbackY = awayY / distance * 250;
-    player.hitUntil = now + 430;
-    audio.play("hit");
-    showToast("회전봉에 밀려났다!");
-    break;
-  }
-}
-
-function updateProgress(now: number) {
-  if (matchFinished || player.fallingUntil > now || player.flattenedUntil > 0) return;
-  const checkpoint = checkpoints[checkpointIndex];
-  if (checkpoint && runnerTouchesRaceZone(equippedSkill, player.x, player.y, checkpoint, 8)) {
-    audio.play("checkpoint");
-    checkpointIndex += 1;
-    refillPlayerAmmo();
-    rollEquippedSkill(now, false);
-    const skillNotice = ` 새 스킬: ${skillLabels[equippedSkill]}${isPassiveSkill(equippedSkill) ? " 자동 적용!" : "!"}`;
-    if (checkpointIndex === checkpoints.length) {
-      startArmed = true;
-      showToast(currentMap.courseType === "linear"
-        ? `마지막 체크포인트 통과! 정상까지 올라가세요.${skillNotice}`
-        : `마지막 체크포인트 통과! 출발선으로 돌아가세요.${skillNotice}`);
-    } else {
-      showToast(`${checkpointIndex}번째 체크포인트 통과!${skillNotice}`);
-    }
-    return;
-  }
-
-  if (startArmed && runnerTouchesRaceZone(equippedSkill, player.x, player.y, currentMap.finishGate)) {
-    lap += 1;
-    checkpointIndex = 0;
-    startArmed = false;
-    player.hitUntil = now + 300;
-    if (lap >= roomConfig.lapLimit) finishMatch(player.name);
-    else {
-      rollEquippedSkill(now, false);
-      dashCharges = 3;
-      dashRechargeAt = 0;
-      if (currentMap.courseType === "linear") {
-        player.x = currentMap.startPoint.x;
-        player.y = currentMap.startPoint.y;
-        player.direction = "right";
-        player.knockbackX = 0;
-        player.knockbackY = 0;
-      }
-      const skillNotice = ` 새 스킬: ${skillLabels[equippedSkill]}${isPassiveSkill(equippedSkill) ? " 자동 적용!" : "!"}`;
-      showToast(currentMap.courseType === "linear"
-        ? `${lap}랩 완주! 산 아래 출발점으로 순간이동했습니다.${skillNotice}`
-        : `${lap}랩 완주! 다음 바퀴도 말썽을 피워보자.${skillNotice}`);
-    }
-  }
+  const spinnerElapsed = (networkSpinnerElapsedAtSync + Math.max(0, now - networkSpinnerSyncedAt)) / 1000;
+  for (const spinner of spinners) spinner.angle = spinner.speed * spinnerElapsed;
 }
 
 function updatePlayer(dt: number, now: number) {
@@ -1897,7 +1099,7 @@ function updatePlayer(dt: number, now: number) {
 }
 
 function getCamera() {
-  const playerId = multiplayerActive ? getLocalNetworkPlayerId() : LOCAL_GRAPPLE_ID;
+  const playerId = getLocalNetworkPlayerId();
   const grappledPosition = getGrappledPosition(
     playerId,
     player.x,
@@ -1905,8 +1107,8 @@ function getCamera() {
     performance.now(),
   );
   const position = getPushedPosition(playerId, grappledPosition.x, grappledPosition.y, performance.now());
-  const worldWidth = gameMode === "track" ? currentMap.worldWidth : WORLD_WIDTH;
-  const worldHeight = gameMode === "track" ? currentMap.worldHeight : WORLD_HEIGHT;
+  const worldWidth = currentMap.worldWidth;
+  const worldHeight = currentMap.worldHeight;
   return {
     x: Math.max(0, Math.min(worldWidth - VIEW_WIDTH, position.x - VIEW_WIDTH / 2)),
     y: Math.max(0, Math.min(worldHeight - VIEW_HEIGHT, position.y - VIEW_HEIGHT / 2)),
@@ -1949,56 +1151,6 @@ function drawAimGuide(context: CanvasRenderingContext2D, cameraX: number, camera
     fillRect(context, "#c5f3ed", pulseX - radius, pulseY - radius, 2, radius * 2 + 1);
     fillRect(context, "#c5f3ed", pulseX + radius - 1, pulseY - radius, 2, radius * 2 + 1);
   }
-}
-
-function drawPracticeFloor(context: CanvasRenderingContext2D, cameraX: number, cameraY: number) {
-  const practiceNoise = (x: number, y: number) => {
-    const value = Math.sin(x * 87.3 + y * 41.7) * 1031.77;
-    return value - Math.floor(value);
-  };
-  const firstX = Math.floor(cameraX / PRACTICE_TILE) - 1;
-  const firstY = Math.floor(cameraY / PRACTICE_TILE) - 1;
-  const lastX = Math.ceil((cameraX + VIEW_WIDTH) / PRACTICE_TILE) + 1;
-  const lastY = Math.ceil((cameraY + VIEW_HEIGHT) / PRACTICE_TILE) + 1;
-  for (let ty = firstY; ty <= lastY; ty += 1) {
-    for (let tx = firstX; tx <= lastX; tx += 1) {
-      const x = tx * PRACTICE_TILE - cameraX;
-      const y = ty * PRACTICE_TILE - cameraY;
-      const worldX = tx * PRACTICE_TILE + PRACTICE_TILE / 2;
-      const worldY = ty * PRACTICE_TILE + PRACTICE_TILE / 2;
-      const inArena = insideRect(worldX, worldY, PRACTICE_ARENA.left, PRACTICE_ARENA.top, PRACTICE_ARENA.right, PRACTICE_ARENA.bottom);
-      fillRect(context, inArena ? ((tx + ty) % 2 ? "#59617c" : "#626b86") : "#292b4a", x, y, PRACTICE_TILE, PRACTICE_TILE);
-      if (inArena) {
-        fillRect(context, "#777f99", x, y + PRACTICE_TILE - 2, PRACTICE_TILE, 2);
-        if (practiceNoise(tx, ty) > .7) fillRect(context, "#93a2b2", x + 4, y + 4, 2, 2);
-      }
-    }
-  }
-  const line = (color: string, x: number, y: number, width: number, height: number) => fillRect(context, color, x - cameraX, y - cameraY, width, height);
-  line("#e8c861", PRACTICE_ARENA.left, PRACTICE_ARENA.top, PRACTICE_ARENA.right - PRACTICE_ARENA.left, 4);
-  line("#e8c861", PRACTICE_ARENA.left, PRACTICE_ARENA.bottom - 4, PRACTICE_ARENA.right - PRACTICE_ARENA.left, 4);
-  line("#e8c861", PRACTICE_ARENA.left, PRACTICE_ARENA.top, 4, PRACTICE_ARENA.bottom - PRACTICE_ARENA.top);
-  line("#e8c861", PRACTICE_ARENA.right - 4, PRACTICE_ARENA.top, 4, PRACTICE_ARENA.bottom - PRACTICE_ARENA.top);
-  line("#3e4563", 424, 312, 48, 48);
-  line("#8ee0bf", 428, 316, 40, 3);
-  line("#8ee0bf", 428, 353, 40, 3);
-}
-
-function drawTestBot(context: CanvasRenderingContext2D, bot: TestBot, cameraX: number, cameraY: number, time: number) {
-  const position = getGrappledPosition(bot.id, bot.x, bot.y, time);
-  const x = position.x - cameraX;
-  const baseY = position.y - cameraY;
-  const flightLift = getFlightLift(bot.skill, time);
-  const y = baseY - flightLift;
-  const sleeping = bot.sleepUntil > time;
-  if (flightLift > 0) drawFlightEffect(context, x, y, time);
-  drawSkillScaledPerson(context, x, y, bot.direction, bot.walking, bot.color, bot.skill, true, sleeping);
-  const statusLeft = Math.round(x - 12);
-  const statusY = getSkillStatusY(y, bot.skill);
-  drawHealthPips(context, statusLeft, statusY, bot.health);
-  updateRunnerLabels(bot, statusLeft, statusY);
-  drawSlowStatus(context, x, y, time, bot.slowUntil);
-  drawSleepStatus(context, x, y, time, bot.sleepUntil);
 }
 
 function drawRemotePlayer(context: CanvasRenderingContext2D, runner: RemotePlayer, cameraX: number, cameraY: number, time: number) {
@@ -2164,18 +1316,20 @@ function escapeMarkup(value: string) {
 }
 
 function updateRaceBoard() {
-  if (gameMode !== "track") {
-    elements.raceBoard.classList.add("hidden");
-    return;
-  }
   elements.raceBoard.classList.remove("hidden");
   const finishLabel = currentMap.courseType === "linear" ? "TOP" : "START";
   const playerCheckpoint = lap >= roomConfig.lapLimit ? "FIN" : checkpointIndex < checkpoints.length ? `CP${checkpointIndex + 1}` : finishLabel;
-  const otherRunners = multiplayerActive
-    ? [...remotePlayers.values()].map((runner) => ({ id: runner.id, name: runner.connected ? runner.name : `${runner.name} · 재접속`, color: runner.color, lap: runner.lap, checkpoint: runner.checkpoint, label: runner.lap >= roomConfig.lapLimit ? "FIN" : runner.checkpoint < checkpoints.length ? `CP${runner.checkpoint + 1}` : finishLabel, me: false }))
-    : testBots.map((bot) => ({ id: bot.id, name: bot.name, color: bot.color, lap: bot.lap, checkpoint: bot.checkpoint, label: bot.routeIndex < checkpoints.length ? `CP${bot.routeIndex + 1}` : finishLabel, me: false }));
+  const otherRunners = [...remotePlayers.values()].map((runner) => ({
+    id: runner.id,
+    name: runner.connected ? runner.name : `${runner.name} · REJOIN`,
+    color: runner.color,
+    lap: runner.lap,
+    checkpoint: runner.checkpoint,
+    label: runner.lap >= roomConfig.lapLimit ? "FIN" : runner.checkpoint < checkpoints.length ? `CP${runner.checkpoint + 1}` : finishLabel,
+    me: false,
+  }));
   const runners = [
-    { id: 0, name: player.name, color: player.color, lap, checkpoint: checkpointIndex, label: playerCheckpoint, me: true },
+    { id: "local", name: player.name, color: player.color, lap, checkpoint: checkpointIndex, label: playerCheckpoint, me: true },
     ...otherRunners,
   ].sort((a, b) => b.lap * 4 + b.checkpoint - (a.lap * 4 + a.checkpoint));
   const markup = `<div class="race-title"><span>RACE BOARD</span><span>${runners.length}P</span></div>${runners.map((runner, index) => `<div class="race-row${runner.me ? " me" : ""}"><span>${index + 1}</span><i class="race-dot" style="background:${runner.color}"></i><span class="race-name">${escapeMarkup(runner.name)}</span><span class="race-progress">${Math.min(runner.lap, roomConfig.lapLimit)}/${roomConfig.lapLimit}</span><span class="race-cp">${runner.label}</span></div>`).join("")}`;
@@ -2185,36 +1339,7 @@ function updateRaceBoard() {
   }
 }
 
-function drawPractice(context: CanvasRenderingContext2D, time: number) {
-  const camera = getCamera();
-  const cameraX = camera.x;
-  const cameraY = camera.y;
-  context.clearRect(0, 0, VIEW_WIDTH, VIEW_HEIGHT);
-  drawPracticeFloor(context, cameraX, cameraY);
-  for (const clone of clones) drawClone(context, clone, cameraX, cameraY, time);
-  const bots = [...testBots].sort((a, b) => a.y - b.y);
-  let playerDrawn = false;
-  for (const bot of bots) {
-    if (!playerDrawn && player.y < bot.y) {
-      drawPlayer(context, cameraX, cameraY, time);
-      playerDrawn = true;
-    }
-    drawTestBot(context, bot, cameraX, cameraY, time);
-  }
-  if (!playerDrawn) drawPlayer(context, cameraX, cameraY, time);
-  for (const projectile of projectiles) drawProjectile(context, projectile, cameraX, cameraY);
-  drawSlowImpacts(context, cameraX, cameraY, time);
-  drawGrappleEffects(context, cameraX, cameraY, time);
-  drawAimGuide(context, cameraX, cameraY, time);
-  fillRect(context, "rgba(34,26,57,.28)", 0, 0, VIEW_WIDTH, 3);
-  fillRect(context, "rgba(34,26,57,.28)", 0, VIEW_HEIGHT - 3, VIEW_WIDTH, 3);
-}
-
 function drawTown(context: CanvasRenderingContext2D, time: number) {
-  if (gameMode === "practice") {
-    drawPractice(context, time);
-    return;
-  }
   const camera = getCamera();
   const cameraX = camera.x;
   const cameraY = camera.y;
@@ -2235,13 +1360,10 @@ function drawTown(context: CanvasRenderingContext2D, time: number) {
       drawPlayer(context, cameraX, cameraY, time);
       playerDrawn = true;
     }
-    drawProp(context, prop, cameraX, cameraY);
+    drawWorldProp(context, prop, cameraX, cameraY);
   }
   if (playerRenderLayer === 0 && !playerDrawn) drawPlayer(context, cameraX, cameraY, time);
 
-  for (const bot of testBots) {
-    if (getSkillRenderLayer(bot.skill) === 0) drawTestBot(context, bot, cameraX, cameraY, time);
-  }
   for (const runner of remotePlayers.values()) {
     if (getSkillRenderLayer(runner.skill) === 0) drawRemotePlayer(context, runner, cameraX, cameraY, time);
   }
@@ -2252,9 +1374,6 @@ function drawTown(context: CanvasRenderingContext2D, time: number) {
 
   for (const renderLayer of [1, 2] as const) {
     if (playerRenderLayer === renderLayer) drawPlayer(context, cameraX, cameraY, time);
-    for (const bot of testBots) {
-      if (getSkillRenderLayer(bot.skill) === renderLayer) drawTestBot(context, bot, cameraX, cameraY, time);
-    }
     for (const runner of remotePlayers.values()) {
       if (getSkillRenderLayer(runner.skill) === renderLayer) drawRemotePlayer(context, runner, cameraX, cameraY, time);
     }
@@ -2272,17 +1391,11 @@ function animate(now: number) {
   if (titleFallbackActive) drawTitlePreview(now);
   if (gameActive) {
     if (!matchFinished) {
-      if (gameMode === "track") {
-        updateHazards(now, dt);
-        updateTrackBots(now, dt);
-      } else updatePracticeBots(now, dt);
+      updateHazards(now, dt);
       updatePlayer(dt, now);
-      if (gameMode === "track" && !multiplayerActive) updateProgress(now);
       updateProjectiles(now, dt);
-      if (gameMode === "track") {
-        interpolateRemotePlayers(dt);
-        sendLocalNetworkState(now);
-      }
+      interpolateRemotePlayers(dt);
+      sendLocalNetworkState(now);
     }
     drawTown(gameContext, now);
     updateSkillBar(now);
@@ -2698,7 +1811,13 @@ function ensureSocketConnected() {
   });
 }
 
-function requestNetworkRoom(event: "room:create" | "room:join" | "room:resume" | "room:start" | "room:rematch", payload?: unknown) {
+type NetworkRoomRequest =
+  | { event: typeof CLIENT_EVENTS.createRoom; payload: RoomCreatePayload }
+  | { event: typeof CLIENT_EVENTS.joinRoom; payload: RoomJoinPayload }
+  | { event: typeof CLIENT_EVENTS.startRoom }
+  | { event: typeof CLIENT_EVENTS.rematchRoom };
+
+function requestNetworkRoom(request: NetworkRoomRequest) {
   return new Promise<NetworkRoom>((resolve, reject) => {
     let settled = false;
     const timeout = window.setTimeout(() => {
@@ -2715,8 +1834,10 @@ function requestNetworkRoom(event: "room:create" | "room:join" | "room:resume" |
       if (response.session) storeNetworkSession(response.session);
       resolve(response.room);
     };
-    if (payload === undefined) socket.emit(event, done);
-    else socket.emit(event, payload, done);
+    if (request.event === CLIENT_EVENTS.createRoom) socket.emit(CLIENT_EVENTS.createRoom, request.payload, done);
+    else if (request.event === CLIENT_EVENTS.joinRoom) socket.emit(CLIENT_EVENTS.joinRoom, request.payload, done);
+    else if (request.event === CLIENT_EVENTS.startRoom) socket.emit(CLIENT_EVENTS.startRoom, done);
+    else socket.emit(CLIENT_EVENTS.rematchRoom, done);
   });
 }
 
@@ -2749,7 +1870,7 @@ function resumeNetworkSession() {
     showToast("재접속 응답이 지연되고 있습니다. 다시 시도합니다.");
     if (socket.connected) window.setTimeout(resumeNetworkSession, 500);
   }, 5000);
-  socket.emit("room:resume", session, (response: NetworkResponse) => {
+  socket.emit(CLIENT_EVENTS.resumeRoom, session, (response: NetworkResponse) => {
     window.clearTimeout(timeout);
     networkResumeInFlight = false;
     if (activeNetworkSession?.playerId !== session.playerId) return;
@@ -2768,7 +1889,7 @@ function resumeNetworkSession() {
 function sendLocalNetworkState(now: number) {
   if (!multiplayerActive || !socket.connected || player.dashUntil > now || isLocalActionLocked(now) || now - lastNetworkStateAt < 55) return;
   lastNetworkStateAt = now;
-  socket.emit("player:state", {
+  socket.emit(CLIENT_EVENTS.playerState, {
     x: player.x,
     y: player.y,
     direction: player.direction,
@@ -2802,6 +1923,14 @@ function readRoomConfig(): RoomConfig | undefined {
   return { lapLimit, playerCount, mapId, enabledSkills };
 }
 
+function updateSkillPoolSummary() {
+  const selectedCount = elements.titleSkillPool.querySelectorAll<HTMLInputElement>('input[type="checkbox"]:checked').length;
+  const invalid = selectedCount < 3;
+  elements.titleSkillCount.textContent = `${selectedCount}개 선택 · 최소 3개`;
+  elements.titleSkillCount.classList.toggle("invalid", invalid);
+  elements.titleSkillPool.classList.toggle("invalid", invalid);
+}
+
 function startNetworkMatch(room: NetworkRoom) {
   if (multiplayerActive && gameActive && activeNetworkRoom?.code === room.code && activeNetworkRound === room.round) {
     applyNetworkRoom(room);
@@ -2826,7 +1955,6 @@ function startNetworkMatch(room: NetworkRoom) {
   syncNetworkHazardLayout(room);
   syncRemotePlayers(room);
   const now = performance.now();
-  gameMode = "track";
   resetWorldLabels();
   matchFinished = false;
   hideMatchResults();
@@ -2853,7 +1981,6 @@ function startNetworkMatch(room: NetworkRoom) {
   player.shotReadyAt = 0;
   equippedSkill = self.skill;
   runUntil = 0;
-  testBots.length = 0;
   clones.length = 0;
   syncNetworkClones(room);
   syncNetworkRocks(room);
@@ -2885,7 +2012,7 @@ function startNetworkMatch(room: NetworkRoom) {
 
 function returnToTitle() {
   setMusicTheme("lobby");
-  if (activeNetworkRoom) socket.emit("room:leave");
+  if (activeNetworkRoom) socket.emit(CLIENT_EVENTS.leaveRoom);
   clearNetworkSession();
   activeNetworkRoom = undefined;
   activeNetworkRound = 0;
@@ -2901,7 +2028,6 @@ function returnToTitle() {
   pushLockUntil = 0;
   grappleEffects.length = 0;
   pushEffects.length = 0;
-  gameMode = "track";
   resetWorldLabels();
   gameActive = false;
   aim.visible = false;
@@ -2988,7 +2114,7 @@ function openTitleRoomPanel(mode: TitleRoomMode) {
 
 function closeTitleRoomPanel() {
   if (activeNetworkRoom && !gameActive) {
-    socket.emit("room:leave");
+    socket.emit(CLIENT_EVENTS.leaveRoom);
     clearNetworkSession();
   }
   activeNetworkRoom = undefined;
@@ -3010,7 +2136,7 @@ async function startFromTitleRoomPanel() {
     await ensureSocketConnected();
     if (activeNetworkRoom) {
       if (activeNetworkRoom.hostId !== getLocalNetworkPlayerId()) return;
-      const room = await requestNetworkRoom("room:start");
+      const room = await requestNetworkRoom({ event: CLIENT_EVENTS.startRoom });
       applyNetworkRoom(room);
       return;
     }
@@ -3021,7 +2147,7 @@ async function startFromTitleRoomPanel() {
         elements.titleRoomCode.focus();
         return;
       }
-      const room = await requestNetworkRoom("room:join", { code, name: runnerName });
+      const room = await requestNetworkRoom({ event: CLIENT_EVENTS.joinRoom, payload: { code, name: runnerName } });
       applyNetworkRoom(room);
       showToast(`${room.code} 방에 참가했습니다. 방장 시작을 기다리세요.`);
       return;
@@ -3035,7 +2161,7 @@ async function startFromTitleRoomPanel() {
     }
     const config = readRoomConfig();
     if (!config) return;
-    const room = await requestNetworkRoom("room:create", { code: inviteCode, name: runnerName, config });
+    const room = await requestNetworkRoom({ event: CLIENT_EVENTS.createRoom, payload: { code: inviteCode, name: runnerName, config } });
     applyNetworkRoom(room);
     showToast(`방 생성 완료 · 초대 코드 ${room.code}`);
   } catch (error) {
@@ -3048,7 +2174,7 @@ async function startNetworkRematch() {
   elements.resultRematch.disabled = true;
   elements.resultStatus.textContent = "출발선을 다시 준비하고 있습니다…";
   try {
-    const room = await requestNetworkRoom("room:rematch");
+    const room = await requestNetworkRoom({ event: CLIENT_EVENTS.rematchRoom });
     applyNetworkRoom(room);
     elements.resultStatus.textContent = "3초 뒤 재대결이 시작됩니다.";
   } catch (error) {
@@ -3221,6 +2347,7 @@ elements.titleConfirm.addEventListener("click", () => { void startFromTitleRoomP
 elements.titlePanelBack.addEventListener("click", closeTitleRoomPanel);
 elements.titleRoomCode.addEventListener("keydown", (event) => { if (event.key === "Enter") void startFromTitleRoomPanel(); });
 elements.titleInviteCode.addEventListener("keydown", (event) => { if (event.key === "Enter") void startFromTitleRoomPanel(); });
+elements.titleSkillPool.addEventListener("change", updateSkillPoolSummary);
 elements.titleCopyRoomCode.addEventListener("click", () => { void copyActiveRoomCode(); });
 elements.back.addEventListener("click", returnToTitle);
 elements.fullscreen.addEventListener("click", () => { void toggleFullscreen(); });
@@ -3232,43 +2359,44 @@ elements.audio.addEventListener("click", () => {
 });
 elements.audio.textContent = audio.muted ? "소리 OFF" : "소리 ON";
 elements.audio.setAttribute("aria-pressed", String(audio.muted));
+updateSkillPoolSummary();
 elements.resultRematch.addEventListener("click", () => { void startNetworkRematch(); });
 elements.resultToTitle.addEventListener("click", returnToTitle);
 
 socket.on("connect", () => {
   if (activeNetworkSession) resumeNetworkSession();
 });
-socket.on("room:state", (room: NetworkRoom) => applyNetworkRoom(room));
-socket.on("match:countdown", (room: NetworkRoom) => applyNetworkRoom(room));
-socket.on("match:started", (room: NetworkRoom) => {
+socket.on(SERVER_EVENTS.roomState, (room) => applyNetworkRoom(room));
+socket.on(SERVER_EVENTS.matchCountdown, (room) => applyNetworkRoom(room));
+socket.on(SERVER_EVENTS.matchStarted, (room) => {
   showNetworkStartBanner();
   startNetworkMatch(room);
 });
-socket.on("match:finished", (room: NetworkRoom) => applyNetworkRoom(room));
-socket.on("hazard:warning", (hazards: NetworkHazards) => {
+socket.on(SERVER_EVENTS.matchFinished, (room) => applyNetworkRoom(room));
+socket.on(SERVER_EVENTS.hazardWarning, (hazards) => {
   syncNetworkHazards(hazards);
   showToast("구덩이 경고! 잠시 후 열린다.");
 });
-socket.on("hazard:state", (hazards: NetworkHazards) => {
+socket.on(SERVER_EVENTS.hazardState, (hazards) => {
   const warnedPitIndex = warningPitIndex;
   syncNetworkHazards(hazards);
   if (hazards.activePitIndex >= 0 && hazards.activePitIndex === warnedPitIndex) {
     showToast("구덩이가 열렸다!");
   }
 });
-socket.on("hazard:effect", (effect: HazardEffect) => applyNetworkHazardEffect(effect));
-socket.on("hazard:rock:spawn", (rock: NetworkRock) => {
+socket.on(SERVER_EVENTS.hazardEffect, (effect) => applyNetworkHazardEffect(effect));
+socket.on(SERVER_EVENTS.rockSpawn, (rock) => {
   if (!multiplayerActive) return;
   upsertNetworkRock(rock);
 });
-socket.on("hazard:rock:remove", (event: { id: string; reason: "barrier" | "player" | "expired"; playerId?: string; defeated?: boolean }) => {
+socket.on(SERVER_EVENTS.rockRemove, (event: NetworkRockRemoval) => {
   const index = rollingRocks.findIndex((rock) => rock.id === event.id);
   if (index >= 0) rollingRocks.splice(index, 1);
   if (event.playerId !== getLocalNetworkPlayerId()) return;
   audio.play("hit");
   showToast(event.defeated ? "낙석에 완전히 깔렸습니다!" : "낙석에 맞아 납작해졌습니다!");
 });
-socket.on("race:teleport", (event: { playerId: string; x: number; y: number; lap: number }) => {
+socket.on(SERVER_EVENTS.raceTeleport, (event: NetworkTeleport) => {
   if (!multiplayerActive) return;
   if (event.playerId === getLocalNetworkPlayerId()) {
     player.x = event.x;
@@ -3284,15 +2412,15 @@ socket.on("race:teleport", (event: { playerId: string; x: number; y: number; lap
   runner.targetX = event.x;
   runner.targetY = event.y;
 });
-socket.on("player:state", (runner: NetworkPlayer) => {
+socket.on(SERVER_EVENTS.playerState, (runner) => {
   if (!multiplayerActive || runner.id === getLocalNetworkPlayerId()) return;
   upsertRemotePlayer(runner);
 });
-socket.on("combat:shot", (shot: { sourceId: string; x: number; y: number; dx: number; dy: number }) => {
+socket.on(SERVER_EVENTS.combatShot, (shot: NetworkShot) => {
   if (!multiplayerActive || shot.sourceId === getLocalNetworkPlayerId()) return;
   projectiles.push({ kind: "bullet", owner: "remote", sourceId: shot.sourceId, x: shot.x, y: shot.y, velocityX: shot.dx * 430, velocityY: shot.dy * 430, until: performance.now() + 620, radius: 0 });
 });
-socket.on("combat:projectile", (projectile: { kind: "slow" | "sleep"; sourceId: string; x: number; y: number; velocityX: number; velocityY: number; lifetime: number }) => {
+socket.on(SERVER_EVENTS.combatProjectile, (projectile: NetworkProjectile) => {
   if (!multiplayerActive || projectile.sourceId === getLocalNetworkPlayerId()) return;
   projectiles.push({
     kind: projectile.kind,
@@ -3307,7 +2435,7 @@ socket.on("combat:projectile", (projectile: { kind: "slow" | "sleep"; sourceId: 
     visualOnly: true,
   });
 });
-socket.on("combat:grapple", (grapple: Omit<GrappleEffect, "startedAt" | "until">) => {
+socket.on(SERVER_EVENTS.combatGrapple, (grapple: NetworkGrapple) => {
   if (!multiplayerActive) return;
   const now = performance.now();
   if (grapple.targetId !== undefined) grappleEffects.splice(0, grappleEffects.length, ...grappleEffects.filter((effect) => effect.targetId !== grapple.targetId));
@@ -3315,7 +2443,7 @@ socket.on("combat:grapple", (grapple: Omit<GrappleEffect, "startedAt" | "until">
   const playerId = getLocalNetworkPlayerId();
   if (grapple.sourceId === playerId || grapple.targetId === playerId) grappleLockUntil = now + 520;
 });
-socket.on("combat:knockback", (knockback: Omit<PushEffect, "startedAt" | "until">) => {
+socket.on(SERVER_EVENTS.combatKnockback, (knockback: NetworkKnockback) => {
   if (!multiplayerActive) return;
   const now = performance.now();
   pushEffects.splice(0, pushEffects.length, ...pushEffects.filter((effect) => effect.targetId !== knockback.targetId));
@@ -3337,7 +2465,7 @@ socket.on("combat:knockback", (knockback: Omit<PushEffect, "startedAt" | "until"
     remote.targetY = knockback.endY;
   }
 });
-socket.on("combat:effect", (effect: { kind: "bullet" | SkillId; sourceId: string; targetIds: string[]; duration?: number; defeated?: boolean; x?: number; y?: number }) => {
+socket.on(SERVER_EVENTS.combatEffect, (effect: NetworkCombatEffect) => {
   if (!multiplayerActive) return;
   const now = performance.now();
   if (effect.kind === "sleep" || effect.kind === "slow") {
