@@ -133,6 +133,15 @@ app.innerHTML = `
               <label><input type="checkbox" value="push" checked /> 밀치기</label><label><input type="checkbox" value="dash" checked /> 돌진</label><label><input type="checkbox" value="run" checked /> 질주</label><label><input type="checkbox" value="grab" checked /> 그랩</label><label><input type="checkbox" value="clone" checked /> 분신</label><label><input type="checkbox" value="slow" checked /> 슬로우탄</label><label><input type="checkbox" value="sleep" checked /> 수면총</label><label><input type="checkbox" value="fly" checked /> 공중부양</label><label><input type="checkbox" value="slow30" checked /> 속도 30%</label><label><input type="checkbox" value="giant" checked /> 5배 거대화</label>
             </div>
           </div>
+          <div id="title-waiting-summary" class="title-waiting-summary hidden">
+            <div class="title-waiting-status"><i aria-hidden="true"></i><strong id="title-waiting-status">참가자를 기다리는 중</strong></div>
+            <div class="title-waiting-meta">
+              <span><small>MAP</small><b id="title-waiting-map">-</b></span>
+              <span><small>RACE</small><b id="title-waiting-rules">-</b></span>
+            </div>
+            <div class="title-waiting-roster-heading"><span>RUNNERS</span><b id="title-waiting-count">0/0</b></div>
+            <div id="title-waiting-players" class="title-waiting-players"></div>
+          </div>
           <div id="title-room-share" class="title-room-share hidden">
             <span>내 방 코드</span>
             <strong id="title-room-share-code">---</strong>
@@ -160,7 +169,7 @@ app.innerHTML = `
           <div class="message-box"><span class="key">WASD</span> 이동 · <span class="key">L-CLICK</span> 총 · <span class="key">R-CLICK</span> 현재 스킬 · 체크포인트에서 탄창과 스킬을 갱신합니다.</div>
           <div id="skill-bar" class="skill-bar" aria-label="스킬 단축키"></div>
           <aside class="game-menu-actions">
-            <button id="back-to-lobby" class="ghost-button">메인 화면으로 돌아가기</button>
+            <button id="back-to-lobby" class="ghost-button">게임 나가기</button>
           </aside>
           <section id="match-results" class="match-results hidden" role="dialog" aria-modal="true" aria-labelledby="result-title">
             <div class="result-card">
@@ -203,6 +212,12 @@ const elements = {
   titleRoomPanel: getElement<HTMLElement>("#title-room-panel"),
   titlePanelMarker: getElement<HTMLElement>("#title-panel-marker"),
   titlePanelTitle: getElement<HTMLElement>("#title-panel-title"),
+  titleWaitingSummary: getElement<HTMLElement>("#title-waiting-summary"),
+  titleWaitingStatus: getElement<HTMLElement>("#title-waiting-status"),
+  titleWaitingMap: getElement<HTMLElement>("#title-waiting-map"),
+  titleWaitingRules: getElement<HTMLElement>("#title-waiting-rules"),
+  titleWaitingCount: getElement<HTMLElement>("#title-waiting-count"),
+  titleWaitingPlayers: getElement<HTMLElement>("#title-waiting-players"),
   titleRoomShare: getElement<HTMLElement>("#title-room-share"),
   titleRoomShareCode: getElement<HTMLElement>("#title-room-share-code"),
   titleCopyRoomCode: getElement<HTMLButtonElement>("#title-copy-room-code"),
@@ -2566,13 +2581,42 @@ function updateNetworkWaitingPanel() {
   const countingDown = activeNetworkRoom.countdownMs > 0;
   const connectedPlayers = countConnectedPlayers(activeNetworkRoom);
   elements.titleRoomPanel.classList.add("network-waiting");
+  elements.titleWaitingSummary.classList.remove("hidden");
   elements.titlePanelMarker.textContent = "ONLINE ROOM";
   const map = getMapDefinition(activeNetworkRoom.config.mapId);
-  elements.titlePanelTitle.textContent = `${activeNetworkRoom.code} · ${connectedPlayers}/${activeNetworkRoom.config.playerCount}명 · ${map.name}`;
+  elements.titlePanelTitle.textContent = activeNetworkRoom.code;
+  elements.titleWaitingStatus.textContent = countingDown
+    ? "출발 카운트다운 진행 중"
+    : isHost
+      ? connectedPlayers < 2 ? "한 명 이상의 러너를 기다리는 중" : "모두 준비됐어요. 경기를 시작하세요!"
+      : "방장이 경기를 시작할 때까지 기다려주세요";
+  elements.titleWaitingMap.textContent = map.name;
+  elements.titleWaitingRules.textContent = `${activeNetworkRoom.config.lapLimit}랩 · 스킬 ${activeNetworkRoom.config.enabledSkills.length}종`;
+  elements.titleWaitingCount.textContent = `${connectedPlayers}/${activeNetworkRoom.config.playerCount}`;
+  elements.titleWaitingPlayers.replaceChildren();
+  for (const runner of activeNetworkRoom.players) {
+    const row = document.createElement("div");
+    row.className = "title-waiting-player";
+    if (!runner.connected) row.classList.add("disconnected");
+    const color = document.createElement("i");
+    color.style.backgroundColor = runner.color;
+    const name = document.createElement("span");
+    name.textContent = runner.name;
+    const role = document.createElement("b");
+    role.textContent = runner.id === activeNetworkRoom.hostId
+      ? "HOST"
+      : runner.connected ? "READY" : "REJOIN";
+    row.append(color, name, role);
+    elements.titleWaitingPlayers.append(row);
+  }
   elements.titleRoomShare.classList.toggle("hidden", !isHost);
   elements.titleRoomShareCode.textContent = activeNetworkRoom.code;
   elements.titleCopyRoomCode.setAttribute("aria-label", `방 코드 ${activeNetworkRoom.code} 복사`);
-  elements.titleConfirm.textContent = countingDown ? "출발 준비!" : isHost ? "경기 시작" : "방장 시작 대기";
+  elements.titleConfirm.textContent = countingDown
+    ? "출발 준비 중"
+    : isHost
+      ? connectedPlayers < 2 ? "참가자 기다리는 중" : "경기 시작"
+      : "방장 시작 대기";
   elements.titleConfirm.disabled = countingDown || !isHost || connectedPlayers < 2;
 }
 
@@ -2922,6 +2966,7 @@ function openTitleRoomPanel(mode: TitleRoomMode) {
   titleRoomMode = mode;
   elements.titleRoomPanel.classList.remove("hidden");
   elements.titleRoomPanel.classList.remove("network-waiting");
+  elements.titleWaitingSummary.classList.add("hidden");
   elements.titleRoomShare.classList.add("hidden");
   elements.titleRoomPanel.classList.toggle("create-mode", mode === "create");
   elements.titleStage.classList.add("room-panel-open");
@@ -2952,6 +2997,7 @@ function closeTitleRoomPanel() {
   remotePlayers.clear();
   elements.titleRoomPanel.classList.add("hidden");
   elements.titleRoomPanel.classList.remove("network-waiting");
+  elements.titleWaitingSummary.classList.add("hidden");
   elements.titleRoomShare.classList.add("hidden");
   elements.titleConfirm.disabled = false;
   elements.titleStage.classList.remove("room-panel-open");
