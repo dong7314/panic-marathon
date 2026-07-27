@@ -14,16 +14,14 @@ import {
   PIT_WARNING_DURATION,
   PLAYER_BASE_SPEED,
   RUN_DURATION,
-  RUN_SPEED_MULTIPLIER,
   ROCK_SQUASH_DURATION,
-  SLOW_SPEED_MULTIPLIER,
   START_POINT,
   WORLD_HEIGHT,
   WORLD_WIDTH,
   getSkillBodyScale,
   getSkillHitRadius,
+  getMovementSpeedMultiplier,
   getSkillRenderLayer,
-  getSkillSpeedMultiplier,
   isDamageImmune,
   isGroundHazardImmune,
   isGiantBodyMovementBlocked,
@@ -1865,6 +1863,7 @@ function updatePlayer(dt: number, now: number) {
     );
     return;
   }
+  if (player.flattenedUntil > 0) return;
   if (player.airUntil > now) return;
   if (grappleLockUntil > now || pushLockUntil > now) return;
   if (multiplayerActive && networkSleepUntil > now) return;
@@ -1882,11 +1881,11 @@ function updatePlayer(dt: number, now: number) {
     vertical /= length;
     if (Math.abs(horizontal) > Math.abs(vertical)) player.direction = horizontal < 0 ? "left" : "right";
     else player.direction = vertical < 0 ? "up" : "down";
-    const skillSpeedMultiplier = getSkillSpeedMultiplier(equippedSkill);
-    const fixedSkillSpeed = skillSpeedMultiplier !== 1;
-    const runMultiplier = !fixedSkillSpeed && runUntil > now ? RUN_SPEED_MULTIPLIER : 1;
-    const slowMultiplier = multiplayerActive && networkSlowUntil > now ? SLOW_SPEED_MULTIPLIER : 1;
-    const movementMultiplier = skillSpeedMultiplier * runMultiplier * slowMultiplier;
+    const movementMultiplier = getMovementSpeedMultiplier(
+      equippedSkill,
+      multiplayerActive && networkSlowUntil > now,
+      runUntil > now,
+    ) * currentMap.movementSpeedMultiplier;
     movePlayer(horizontal * PLAYER_BASE_SPEED * movementMultiplier * dt, vertical * PLAYER_BASE_SPEED * movementMultiplier * dt);
     player.walking += dt * 12 * movementMultiplier;
   }
@@ -2351,9 +2350,9 @@ function syncRemotePlayers(room: NetworkRoom) {
 
 function syncRemoteHazardState(current: RemotePlayer, runner: NetworkPlayer, receivedAt: number) {
   const flattenedMs = Math.max(0, runner.flattenedMs ?? 0);
-  if (flattenedMs > 0) {
+  if (runner.actionState === "flattened" || flattenedMs > 0) {
     current.flattenedStartedAt = receivedAt - Math.max(0, runner.flattenedElapsedMs ?? 0);
-    current.flattenedUntil = receivedAt + flattenedMs;
+    current.flattenedUntil = receivedAt + Math.max(1, flattenedMs);
   } else {
     current.flattenedStartedAt = 0;
     current.flattenedUntil = 0;
@@ -2395,9 +2394,9 @@ function syncPlayerTimedState(runner: NetworkPlayer, receivedAt: number) {
 
 function syncPlayerHazardState(runner: NetworkPlayer, receivedAt: number) {
   const flattenedMs = Math.max(0, runner.flattenedMs ?? 0);
-  if (flattenedMs > 0) {
+  if (runner.actionState === "flattened" || flattenedMs > 0) {
     player.flattenedStartedAt = receivedAt - Math.max(0, runner.flattenedElapsedMs ?? 0);
-    player.flattenedUntil = receivedAt + flattenedMs;
+    player.flattenedUntil = receivedAt + Math.max(1, flattenedMs);
     player.knockbackX = 0;
     player.knockbackY = 0;
     player.airUntil = 0;

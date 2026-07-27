@@ -48,6 +48,7 @@ export function isVoidFallImmune(skill: SkillId): boolean;
 export function isObstacleImmune(skill: SkillId): boolean;
 export function isDamageImmune(skill: SkillId): boolean;
 export function getSkillSpeedMultiplier(skill: SkillId): number;
+export function getMovementSpeedMultiplier(skill: SkillId, slowed?: boolean, running?: boolean): number;
 export function getSkillBodyScale(skill: SkillId): number;
 export function getSkillRenderLayer(skill: SkillId): 0 | 1 | 2;
 export function runnerTouchesRaceZone(

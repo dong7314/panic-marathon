@@ -28,6 +28,7 @@ export type MapDefinition = Readonly<{
   theme: MapTheme;
   courseType: CourseType;
   trackBoundary: TrackBoundary;
+  movementSpeedMultiplier: number;
   worldWidth: number;
   worldHeight: number;
   trackPath: readonly MapPoint[];

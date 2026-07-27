@@ -15,6 +15,7 @@ import {
   SLOW30_SPEED_MULTIPLIER,
   SPINNER_RULES,
   START_POINT,
+  getMovementSpeedMultiplier,
   getSkillBodyScale,
   getSkillHitRadius,
   getSkillRenderLayer,
@@ -190,17 +191,19 @@ test("movement validation enforces speed and track boundaries", () => {
   const normalLimit = getMovementLimit(55);
   const runningLimit = getMovementLimit(55, false, true);
   const slowedLimit = getMovementLimit(55, true, false);
-  const slow30Limit = getMovementLimit(55, false, false, SLOW30_SPEED_MULTIPLIER);
-  const slowedSlow30Limit = getMovementLimit(55, true, false, SLOW30_SPEED_MULTIPLIER);
-  const giantLimit = getMovementLimit(55, false, false, GIANT_SPEED_MULTIPLIER);
-  const slowedGiantLimit = getMovementLimit(55, true, false, GIANT_SPEED_MULTIPLIER);
+  const slow30Limit = getMovementLimit(55, false, false, getMovementSpeedMultiplier("slow30"));
+  const slowedSlow30Limit = getMovementLimit(55, false, false, getMovementSpeedMultiplier("slow30", true));
+  const runningSlow30Limit = getMovementLimit(55, false, false, getMovementSpeedMultiplier("slow30", false, true));
+  const giantLimit = getMovementLimit(55, false, false, getMovementSpeedMultiplier("giant"));
+  const slowedGiantLimit = getMovementLimit(55, false, false, getMovementSpeedMultiplier("giant", true));
   assert.ok(runningLimit > normalLimit);
   assert.ok(slowedLimit < normalLimit);
   assert.ok(slow30Limit < slowedLimit);
-  assert.ok(slowedSlow30Limit < slow30Limit);
+  assert.equal(slowedSlow30Limit, slow30Limit);
+  assert.equal(runningSlow30Limit, slow30Limit);
   assert.ok(giantLimit < normalLimit);
   assert.ok(giantLimit > slow30Limit);
-  assert.ok(slowedGiantLimit < giantLimit);
+  assert.equal(slowedGiantLimit, giantLimit);
 
   assert.equal(isMovementAllowed(128, 856, 140, 856, 55), true);
   assert.equal(isMovementAllowed(128, 856, 200, 856, 55), false);

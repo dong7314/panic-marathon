@@ -119,29 +119,33 @@ function safeLoopBoundary(room, side) {
 }
 
 const MOUNTAIN_CLIMB_ROUTE = Object.freeze([
-  [428, 1178],
-  [623, 993],
-  [750, 915],
-  [869, 858],
-  [1043, 761],
-  [1140, 615],
-  [1275, 555],
-  [1358, 505],
-  [1420, 471],
-  [1501, 474],
-  [1579, 511],
-  [1630, 500],
-  [1677, 462],
-  [1735, 402],
+  [481, 1149],
+  [721, 939],
+  [874, 847],
+  [1016, 777],
+  [1225, 661],
+  [1349, 500],
+  [1510, 425],
+  [1610, 366],
+  [1685, 325],
+  [1778, 321],
+  [1865, 354],
+  [1924, 338],
+  [1982, 294],
+  [2054, 226],
 ]);
 
 test("mountain rooms teleport completed laps and stop the first rolling rock at a barrier", { timeout: 24_000 }, async (t) => {
   const port = await reservePort();
-  const server = spawn(process.execPath, ["server/index.mjs"], {
-    cwd: process.cwd(),
-    env: { ...process.env, PORT: String(port), CLIENT_ORIGIN: "http://127.0.0.1:5174", MATCH_COUNTDOWN_MS: "120" },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const server = spawn(
+    process.execPath,
+    ["--import", "data:text/javascript,Math.random=()=>0", "server/index.mjs"],
+    {
+      cwd: process.cwd(),
+      env: { ...process.env, PORT: String(port), CLIENT_ORIGIN: "http://127.0.0.1:5174", MATCH_COUNTDOWN_MS: "120" },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
   await waitForServer(server);
 
   const url = `http://127.0.0.1:${port}`;
@@ -161,7 +165,7 @@ test("mountain rooms teleport completed laps and stop the first rolling rock at 
       lapLimit: 2,
       playerCount: 2,
       mapId: "mountain-pass",
-      enabledSkills: ["push", "dash", "run"],
+      enabledSkills: ["giant", "fly", "push"],
     },
   });
   await request(guest, "room:join", { code, name: "Sherpa" });
@@ -174,6 +178,7 @@ test("mountain rooms teleport completed laps and stop the first rolling rock at 
   assert.equal(started.spinners.length, 0);
 
   const self = started.players.find((player) => player.id === host.playerId);
+  assert.equal(self.skill, "fly");
   const rockSpawnEvent = onceMatching(host, "hazard:rock:spawn", (rock) => rock.id === "1:0", 12_000);
   const rockRemoveEvent = onceMatching(host, "hazard:rock:remove", (event) => event.id === "1:0", 12_000);
   const lapStateEvent = onceMatching(
@@ -182,7 +187,7 @@ test("mountain rooms teleport completed laps and stop the first rolling rock at 
     (room) => room.players.some((player) => player.id === host.playerId && player.lap === 1),
     18_000,
   );
-  await driveSocket(host, self, [...MOUNTAIN_CLIMB_ROUTE, [1857, 303]]);
+  await driveSocket(host, self, [...MOUNTAIN_CLIMB_ROUTE, [2203, 112]]);
   const lapState = await lapStateEvent;
   const teleported = lapState.players.find((player) => player.id === host.playerId);
   assert.equal(teleported.lap, 1);
@@ -242,8 +247,8 @@ test("mountain flying runners activate checkpoints at the elevated sprite positi
     6000,
   );
   await driveSocket(host, self, [
-    [428, 1178],
-    [623, 1058],
+    [481, 1149],
+    [716, 1007],
   ]);
   const checkpointRoom = await checkpointEvent;
   const flyer = checkpointRoom.players.find((runner) => runner.id === host.playerId);
@@ -312,8 +317,7 @@ test("rolling rocks squash runners before checkpoint recovery", { timeout: 24_00
     (event) => event.kind === "respawn" && event.reason === "rock" && event.playerId === host.playerId,
     18_000,
   );
-  await driveSocket(host, self, [...MOUNTAIN_CLIMB_ROUTE, [1777, 301]]);
-
+  const drivePromise = driveSocket(host, self, [...MOUNTAIN_CLIMB_ROUTE, [2111, 117]]);
   await hitEvent;
   const flattenedRoom = await flattenedStateEvent;
   const flattened = flattenedRoom.players.find((runner) => runner.id === host.playerId);
@@ -321,11 +325,21 @@ test("rolling rocks squash runners before checkpoint recovery", { timeout: 24_00
   assert.equal(flattened.checkpoint, 3);
   assert.equal(flattened.actionState, "flattened");
 
+  host.emit("player:state", { x: flattened.x + 8, y: flattened.y, direction: "right", walking: 2 });
+  await delay(60);
+  const lockedRoomEvent = onceMatching(host, "room:state", (room) => room.code === code);
+  guest.emit("combat:shoot", { dx: 1, dy: 0 });
+  const lockedRoom = await lockedRoomEvent;
+  const locked = lockedRoom.players.find((runner) => runner.id === host.playerId);
+  assert.deepEqual({ x: locked.x, y: locked.y }, { x: flattened.x, y: flattened.y });
+  assert.equal(locked.actionState, "flattened");
+
   const respawn = await respawnEvent;
+  await drivePromise;
   assert.ok(Date.now() - hitDetectedAt >= 600);
   assert.deepEqual(
     { x: respawn.x, y: respawn.y, health: respawn.health, ammo: respawn.ammo },
-    { x: 1464, y: 530, health: 4, ammo: 3 },
+    { x: 1730, y: 383, health: 4, ammo: 3 },
   );
 });
 
@@ -739,8 +753,9 @@ test("jump pads use a server-owned endpoint and lock airborne movement", { timeo
 
   const jumpEffectPromise = onceMatching(guest, "hazard:effect", (effect) => effect.kind === "jump" && effect.playerId === host.playerId, 10_000);
   const airborneRoomPromise = onceMatching(guest, "room:state", (room) => room.players.some((player) => player.id === host.playerId && player.actionState === "airborne"), 10_000);
+  const safeBottomY = safeLoopBoundary(started, "bottom");
   const [, jumpEffect, airborneRoom] = await Promise.all([
-    driveSocket(host, hostStart, [[hostStart.x, 934], [940, 934], [940, 842]]),
+    driveSocket(host, hostStart, [[hostStart.x, safeBottomY], [940, safeBottomY], [940, 842]]),
     jumpEffectPromise,
     airborneRoomPromise,
   ]);

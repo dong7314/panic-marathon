@@ -33,7 +33,7 @@ import {
   RUN_DURATION,
   SKILL_IDS,
   getSkillHitRadius,
-  getSkillSpeedMultiplier,
+  getMovementSpeedMultiplier,
   isDamageImmune,
   isGroundHazardImmune,
   isGiantBodyMovementBlocked,
@@ -1212,17 +1212,20 @@ io.on("connection", (socket) => {
     const now = Date.now();
     if (!canPlayerMove(player, now)) return;
     const elapsed = Math.max(16, now - player.lastUpdateAt);
-    const skillSpeedMultiplier = getSkillSpeedMultiplier(player.skill);
-    const fixedSkillSpeed = skillSpeedMultiplier !== 1;
+    const movementSpeedMultiplier = getMovementSpeedMultiplier(
+      player.skill,
+      player.slowUntil > now,
+      player.runUntil > now,
+    ) * mapForRoom(room).movementSpeedMultiplier;
     if (!isMovementAllowed(
       player.x,
       player.y,
       x,
       y,
       elapsed,
-      player.slowUntil > now,
-      !fixedSkillSpeed && player.runUntil > now,
-      skillSpeedMultiplier,
+      false,
+      false,
+      movementSpeedMultiplier,
       mapForRoom(room),
     )) return;
     if (!canOccupyMap(room, x, y, player.skill)) return;

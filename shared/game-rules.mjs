@@ -63,6 +63,12 @@ export function getSkillSpeedMultiplier(skill) {
   return skill === "giant" ? GIANT_SPEED_MULTIPLIER : 1;
 }
 
+export function getMovementSpeedMultiplier(skill, slowed = false, running = false) {
+  const skillMultiplier = getSkillSpeedMultiplier(skill);
+  if (skillMultiplier !== 1) return skillMultiplier;
+  return (slowed ? SLOW_SPEED_MULTIPLIER : 1) * (running ? RUN_SPEED_MULTIPLIER : 1);
+}
+
 export function getSkillBodyScale(skill) {
   return skill === "giant" ? GIANT_BODY_SCALE : 1;
 }

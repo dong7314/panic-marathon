@@ -32,8 +32,11 @@ test("map catalog exposes loop, falling-boundary, and linear mountain courses", 
   assert.equal(mountain.rockBarriers.length, 6);
   const [pathStart, pathEnd] = mountain.trackPath;
   const pathLength = Math.hypot(pathEnd.x - pathStart.x, pathEnd.y - pathStart.y);
-  assert.ok(Math.abs(pathLength - 2000.66) < 1);
-  assert.equal(mountain.worldWidth, 2016);
+  assert.ok(Math.abs(pathLength - 2400.8) < 1);
+  assert.equal(mountain.movementSpeedMultiplier, .85);
+  assert.equal(schoolyard.movementSpeedMultiplier, 1);
+  assert.equal(station.movementSpeedMultiplier, 1);
+  assert.equal(mountain.worldWidth, 2420);
   assert.equal(mountain.worldHeight, 1512);
   assert.equal(mountain.spawnPoints.every((point) => canStandOnMap(mountain, point.x, point.y)), true);
   assert.equal(mountain.respawnPoints.every((point) => canStandOnMap(mountain, point.x, point.y)), true);
