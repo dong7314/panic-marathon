@@ -2,6 +2,9 @@
   "name": "panic-marathon",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "scripts": {
     "vite": "vite --host 127.0.0.1 --port 5174 --strictPort",
     "server": "node --watch server/index.mjs",
@@ -11,19 +14,22 @@
     "multiplayer": "npm run dev",
     "build": "tsc -b && vite build",
     "check": "tsc -b --pretty false",
-    "check:server": "node --check server/index.mjs && node --check server/config.mjs && node --check server/http-handler.mjs && node --check server/player-session.mjs && node --check server/room-state.mjs && node --check shared/game-rules.mjs && node --check shared/map-catalog.mjs && node --check shared/map-hazards.mjs && node --check shared/map-obstacles.mjs && node --check shared/music-themes.mjs",
+    "check:server": "tsc -p tsconfig.server.json --pretty false && node --check server/index.mjs && node --check server/config.mjs && node --check server/http-handler.mjs && node --check server/logger.mjs && node --check server/player-session.mjs && node --check server/room-state.mjs && node --check server/room-store.mjs && node --check server/room-snapshot.mjs && node --check server/socket-guard.mjs && node --check shared/game-rules.mjs && node --check shared/map-catalog.mjs && node --check shared/map-hazards.mjs && node --check shared/map-obstacles.mjs && node --check shared/music-themes.mjs && node --check shared/network-protocol.mjs",
     "test": "node --test",
     "test:load": "node --test test/multiplayer-load.test.mjs",
+    "test:browser": "playwright test",
+    "test:browser:install": "playwright install chromium",
     "test:soak": "node scripts/soak-multiplayer.mjs",
     "test:deployment": "node --test test/deployment-server.test.mjs",
-    "verify": "npm run check && npm test && npm run build && npm run check:server"
+    "verify": "npm run check && npm test && npm run build && npm run check:server && npm run test:browser"
   },
   "dependencies": {
     "socket.io": "^4.8.3",
     "socket.io-client": "^4.8.3"
   },
   "devDependencies": {
-    "typescript": "^5.8.3",
-    "vite": "^6.3.5"
+    "@playwright/test": "^1.62.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.1.5"
   }
 }

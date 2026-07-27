@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Jump Pad Direction Preview</title>
+    <style>
+      body {
+        display: grid;
+        min-height: 100vh;
+        margin: 0;
+        place-items: center;
+        color: #fff0a7;
+        background: #17182e;
+        font: 12px monospace;
+      }
+
+      main {
+        display: grid;
+        grid-template-columns: repeat(2, 96px);
+        gap: 16px;
+      }
+
+      figure {
+        margin: 0;
+        text-align: center;
+      }
+
+      canvas {
+        width: 96px;
+        height: 96px;
+        background: #293a68;
+        image-rendering: pixelated;
+      }
+    </style>
+  </head>
+  <body>
+    <main id="previews"></main>
+    <script type="module">
+      import { drawJumpPad } from "../../src/game/hazard-renderer.ts";
+
+      const directions = [
+        ["RIGHT", 320, 0],
+        ["LEFT", -320, 0],
+        ["DOWN", 0, 320],
+        ["UP", 0, -320],
+      ];
+      const previews = document.querySelector("#previews");
+
+      for (const [label, pushX, pushY] of directions) {
+        const figure = document.createElement("figure");
+        const canvas = document.createElement("canvas");
+        const caption = document.createElement("figcaption");
+        canvas.width = 96;
+        canvas.height = 96;
+        caption.textContent = label;
+        figure.append(canvas, caption);
+        previews.append(figure);
+
+        const context = canvas.getContext("2d");
+        drawJumpPad(context, {
+          x: pushX === 0 ? 33 : 28,
+          y: pushY === 0 ? 33 : 28,
+          width: pushX === 0 ? 30 : 40,
+          height: pushY === 0 ? 30 : 40,
+          pushX,
+          pushY,
+        }, 0, 0);
+      }
+    </script>
+  </body>
+</html>
