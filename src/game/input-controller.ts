@@ -1,17 +1,11 @@
-import type { SkillId } from "../../shared/game-rules.mjs";
-
 type InputControllerOptions = {
   canvas: HTMLCanvasElement;
   isGameActive: () => boolean;
   isMatchFinished: () => boolean;
-  isPracticeMode: () => boolean;
   onAim: (event: PointerEvent) => void;
   onPrimaryAction: () => void;
   onSecondaryAction: () => void;
   onEscape: () => void;
-  onPracticeSkill: (skill: SkillId) => void;
-  onPracticeRandom: () => void;
-  onTrackRandomRejected: () => void;
   onInteraction: () => void;
 };
 
@@ -26,23 +20,12 @@ const MOVEMENT_KEYS = new Set([
   "arrowright",
 ]);
 
-const SKILL_BY_KEY: Record<string, SkillId | undefined> = {
-  "1": "push",
-  "2": "dash",
-  "3": "run",
-  "4": "grab",
-  "5": "clone",
-  "6": "slow",
-  "7": "sleep",
-};
-
 function controlKey(event: KeyboardEvent) {
   const physicalKeys: Record<string, string> = {
     KeyW: "w",
     KeyA: "a",
     KeyS: "s",
     KeyD: "d",
-    KeyR: "r",
   };
   return physicalKeys[event.code] ?? event.key.toLowerCase();
 }
@@ -53,14 +36,10 @@ export function installInputController(options: InputControllerOptions) {
     canvas,
     isGameActive,
     isMatchFinished,
-    isPracticeMode,
     onAim,
     onPrimaryAction,
     onSecondaryAction,
     onEscape,
-    onPracticeSkill,
-    onPracticeRandom,
-    onTrackRandomRejected,
     onInteraction,
   } = options;
 
@@ -84,18 +63,6 @@ export function installInputController(options: InputControllerOptions) {
     onInteraction();
     if (key === "escape" && isGameActive()) {
       onEscape();
-      return;
-    }
-    const selectedSkill = SKILL_BY_KEY[key];
-    if (isGameActive() && isPracticeMode() && selectedSkill) {
-      event.preventDefault();
-      onPracticeSkill(selectedSkill);
-      return;
-    }
-    if (isGameActive() && key === "r") {
-      event.preventDefault();
-      if (isPracticeMode()) onPracticeRandom();
-      else onTrackRandomRejected();
       return;
     }
     if (MOVEMENT_KEYS.has(key)) {

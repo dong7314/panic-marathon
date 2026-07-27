@@ -31,7 +31,6 @@ import {
   PUSH_DURATION,
   ROCK_SQUASH_DURATION,
   RUN_DURATION,
-  SKILL_IDS,
   getSkillHitRadius,
   getMovementSpeedMultiplier,
   isDamageImmune,
@@ -47,7 +46,7 @@ import {
   runnerTouchesRaceZone,
   runnerTouchesObstacle,
 } from "../shared/game-rules.mjs";
-import { DEFAULT_MAP_ID, getMapDefinition } from "../shared/map-catalog.mjs";
+import { getMapDefinition } from "../shared/map-catalog.mjs";
 import { generateMapHazards } from "../shared/map-hazards.mjs";
 import { generateMapObstacles } from "../shared/map-obstacles.mjs";
 import { canStandOnMap, getTrackFallTarget, pointSegmentDistance } from "../shared/geometry.mjs";
@@ -67,8 +66,6 @@ import {
 } from "../shared/player-state.mjs";
 
 const config = loadServerConfig();
-const TEST_ROOM_CODE = "TEST";
-const SKILLS = new Set(SKILL_IDS);
 const rooms = new Map();
 const serverStartedAt = Date.now();
 
@@ -1064,10 +1061,6 @@ io.on("connection", (socket) => {
     leaveCurrentRoom(socket);
     const requestedCode = normalizeRoomCode(payload?.code);
     const code = requestedCode.length >= 4 ? requestedCode : makeCode();
-    if (code === TEST_ROOM_CODE) {
-      ack(callback, { ok: false, error: "TEST는 참여하기에서만 사용할 수 있는 테스트 방입니다." });
-      return;
-    }
     if (rooms.has(code)) {
       ack(callback, { ok: false, error: "이미 사용 중인 초대 코드입니다." });
       return;
@@ -1088,29 +1081,12 @@ io.on("connection", (socket) => {
   socket.on("room:join", (payload, callback) => {
     leaveCurrentRoom(socket);
     const code = normalizeRoomCode(payload?.code);
-    let room = rooms.get(code);
-    if (code === TEST_ROOM_CODE && !room) {
-      room = createRoomState({
-        code: TEST_ROOM_CODE,
-        config: {
-          lapLimit: 5,
-          playerCount: 6,
-          mapId: DEFAULT_MAP_ID,
-          enabledSkills: [...SKILLS],
-        },
-        phase: "running",
-        round: 1,
-        createHazardState,
-      });
-      resetRoomHazardLayout(room);
-      resetRoomObstacles(room);
-      rooms.set(TEST_ROOM_CODE, room);
-    }
+    const room = rooms.get(code);
     if (!room) {
       ack(callback, { ok: false, error: "방을 찾지 못했습니다. 초대 코드를 확인하세요." });
       return;
     }
-    if (room.phase !== "waiting" && code !== TEST_ROOM_CODE) {
+    if (room.phase !== "waiting") {
       ack(callback, { ok: false, error: "이미 진행 중인 경기입니다." });
       return;
     }

@@ -5,7 +5,6 @@ import {
   CLONE_DURATION,
   CLONE_LIMIT,
   DASH_RECHARGE_DURATION,
-  FIRST_PIT_WARNING_DELAY,
   FLY_VISUAL_LIFT,
   GRAB_HIT_RADIUS,
   GRAB_RANGE,
@@ -42,11 +41,7 @@ import {
   isMapId,
   type MapId,
 } from "../shared/map-catalog.mjs";
-import {
-  generateMapHazards,
-  type GeneratedMapHazards,
-} from "../shared/map-hazards.mjs";
-import { generateMapObstacles } from "../shared/map-obstacles.mjs";
+import type { GeneratedMapHazards } from "../shared/map-hazards.mjs";
 import { canStandOnMap, getTrackFallTarget, insideRect, isMapTrackPoint, pointSegmentDistance } from "../shared/geometry.mjs";
 import type { MusicThemeId } from "../shared/music-themes.mjs";
 import { GameAudio } from "./game/audio";
@@ -121,7 +116,7 @@ app.innerHTML = `
           <div class="title-join-fields">
             <label for="title-room-code">방 번호</label>
             <input id="title-room-code" maxlength="12" placeholder="예: PM-7F2A" autocomplete="off" />
-            <p>초대 받은 방 번호를 입력하세요. <b>test</b>는 멀티 테스트, <b>test-skill</b>은 스킬 연습장입니다.</p>
+            <p>방장이 공유한 초대 코드를 입력하세요.</p>
           </div>
           <div class="title-create-fields">
             <div class="title-config-grid"><label for="title-lap-count">목표 랩 <input id="title-lap-count" type="number" min="1" max="999" step="1" value="5" /></label><label for="title-player-count">인원 <input id="title-player-count" type="number" min="2" max="6" step="1" value="4" /></label></div>
@@ -299,7 +294,6 @@ let dashCharges = 3;
 let dashRechargeAt = 0;
 let runUntil = 0;
 let gameMode: GameMode = "track";
-let skillTestRoomActive = false;
 let roomConfig: RoomConfig = { lapLimit: 5, playerCount: 4, mapId: DEFAULT_MAP_ID, enabledSkills: ["push", "dash", "run", "grab", "clone", "slow", "sleep", "fly", "slow30", "giant"] };
 let equippedSkill: SkillId = "push";
 let matchFinished = false;
@@ -1349,17 +1343,6 @@ function useSkill(id: SkillId, now = performance.now()) {
     showToast("수면총 발사!");
   }
   return true;
-}
-
-function useRandomSkill(now: number) {
-  const available = (Object.keys(skillLabels) as SkillId[]).filter((id) => canUseSkill(id, now));
-  if (!available.length) {
-    showToast("지금 사용할 수 있는 랜덤 스킬이 없다.");
-    return;
-  }
-  const selected = available[Math.floor(Math.random() * available.length)];
-  useSkill(selected, now);
-  showToast(`랜덤 스킬: ${skillLabels[selected]}!`);
 }
 
 function rollEquippedSkill(now: number, announce = true) {
@@ -2775,82 +2758,6 @@ function readRoomConfig(): RoomConfig | undefined {
   return { lapLimit, playerCount, mapId, enabledSkills };
 }
 
-function startLocalGame(name: string) {
-  const config = roomConfig;
-  if (activeNetworkRoom) socket.emit("room:leave");
-  clearNetworkSession();
-  activeNetworkRoom = undefined;
-  activeNetworkRound = 0;
-  multiplayerActive = false;
-  clearNetworkCountdown();
-  remotePlayers.clear();
-  hideMatchResults();
-  const now = performance.now();
-  roomConfig = config;
-  applyMapDefinition(config.mapId);
-  setMusicTheme(config.mapId);
-  mapObstacles = generateMapObstacles(config.mapId).map((obstacle) => ({
-    ...obstacle,
-    solid: true,
-  }));
-  applyHazardLayout(generateMapHazards(config.mapId));
-  gameMode = "track";
-  resetWorldLabels();
-  matchFinished = false;
-  player.name = name;
-  player.color = "#f16c7a";
-  player.x = currentMap.startPoint.x;
-  player.y = currentMap.startPoint.y;
-  player.direction = "right";
-  player.walking = 0;
-  player.knockbackX = 0;
-  player.knockbackY = 0;
-  player.hitUntil = 0;
-  player.flattenedUntil = 0;
-  player.flattenedStartedAt = 0;
-  player.fallingUntil = 0;
-  player.fallingStartedAt = 0;
-  player.airUntil = 0;
-  player.airStartedAt = 0;
-  player.dashUntil = 0;
-  player.dashVelocityX = 0;
-  player.dashVelocityY = 0;
-  player.health = 5;
-  player.ammo = 3;
-  player.shotReadyAt = 0;
-  runUntil = 0;
-  clones.length = 0;
-  projectiles.length = 0;
-  slowImpacts.length = 0;
-  pushEffects.length = 0;
-  (Object.keys(skillReadyAt) as SkillId[]).forEach((id) => { skillReadyAt[id] = 0; });
-  dashCharges = 3;
-  dashRechargeAt = 0;
-  testBots.length = 0;
-  rollEquippedSkill(now, false);
-  skillBarSignature = "";
-  raceBoardSignature = "";
-  lap = 0;
-  checkpointIndex = 0;
-  startArmed = false;
-  activePitIndex = -1;
-  warningPitIndex = -1;
-  pitOpenAt = 0;
-  pits.forEach((pit) => {
-    pit.active = false;
-  });
-  nextPitAt = now + FIRST_PIT_WARNING_DELAY;
-  jumpPadCooldownUntil = 0;
-  aim.visible = false;
-  aim.pulseUntil = 0;
-  elements.back.classList.remove("hidden");
-  elements.game.classList.remove("hidden");
-  gameActive = true;
-  elements.gameCanvas.focus();
-  const passiveNotice = isPassiveSkill(equippedSkill) ? ` ${skillLabels[equippedSkill]} 자동 적용!` : "";
-  showToast(`${name}, ${currentMap.name} ${roomConfig.playerCount}인 ${roomConfig.lapLimit}랩 레이스 시작!${passiveNotice}`);
-}
-
 function startNetworkMatch(room: NetworkRoom) {
   if (multiplayerActive && gameActive && activeNetworkRoom?.code === room.code && activeNetworkRound === room.round) {
     applyNetworkRoom(room);
@@ -2932,69 +2839,6 @@ function startNetworkMatch(room: NetworkRoom) {
   showToast(`${room.code} 멀티 레이스 시작! ${room.players.length}명 연결됨.${passiveNotice}`);
 }
 
-function resetSkillPractice(now: number) {
-  testBots.length = 0;
-  resetWorldLabels();
-  clones.length = 0;
-  projectiles.length = 0;
-  slowImpacts.length = 0;
-  grappleEffects.length = 0;
-  pushEffects.length = 0;
-  if (skillTestRoomActive) {
-    const targets = [
-      { x: 354, y: 338, color: "#f4c562", name: "더미 노랑", skill: "push" as SkillId },
-      { x: 544, y: 338, color: "#78d8e9", name: "더미 파랑", skill: "dash" as SkillId },
-      { x: 345, y: 445, color: "#a985e6", name: "더미 보라", skill: "grab" as SkillId },
-      { x: 555, y: 445, color: "#e58fba", name: "더미 분홍", skill: "sleep" as SkillId },
-    ];
-    targets.forEach((target, index) => testBots.push({
-      ...target,
-      id: index + 1,
-      direction: "down",
-      walking: index,
-      moveX: 0,
-      moveY: 0,
-      nextTurnAt: Number.POSITIVE_INFINITY,
-      knockbackX: 0,
-      knockbackY: 0,
-      slowUntil: 0,
-      sleepUntil: 0,
-      health: 5,
-      lap: 0,
-      checkpoint: 0,
-      routeIndex: 0,
-      shotReadyAt: Number.POSITIVE_INFINITY,
-    }));
-  }
-  (Object.keys(skillReadyAt) as SkillId[]).forEach((id) => { skillReadyAt[id] = 0; });
-  equippedSkill = "push";
-  dashCharges = 3;
-  dashRechargeAt = 0;
-  runUntil = 0;
-  skillBarSignature = "";
-}
-
-function enterPractice() {
-  setMusicTheme("lobby");
-  gameMode = "practice";
-  const now = performance.now();
-  player.x = 448;
-  player.y = 428;
-  player.direction = "up";
-  player.walking = 0;
-  player.knockbackX = 0;
-  player.knockbackY = 0;
-  player.hitUntil = 0;
-  player.flattenedUntil = 0;
-  player.flattenedStartedAt = 0;
-  player.fallingUntil = 0;
-  player.airUntil = 0;
-  player.dashUntil = 0;
-  runUntil = 0;
-  resetSkillPractice(now);
-  showToast(skillTestRoomActive ? "스킬 테스트 방 입장! 더미에게 자유롭게 사용해보세요." : "스킬 연습장 입장! 숫자 1~7 또는 R을 눌러 테스트하세요.");
-}
-
 function returnToTitle() {
   setMusicTheme("lobby");
   if (activeNetworkRoom) socket.emit("room:leave");
@@ -3013,7 +2857,6 @@ function returnToTitle() {
   pushLockUntil = 0;
   grappleEffects.length = 0;
   pushEffects.length = 0;
-  skillTestRoomActive = false;
   gameMode = "track";
   resetWorldLabels();
   gameActive = false;
@@ -3115,20 +2958,8 @@ function closeTitleRoomPanel() {
   elements.titleStage.classList.remove("create-panel-open");
 }
 
-function startSkillTestRoom(name: string) {
-  elements.title.classList.add("hidden");
-  startLocalGame(name);
-  if (!gameActive) return;
-  skillTestRoomActive = true;
-  enterPractice();
-}
-
 async function startFromTitleRoomPanel() {
   const runnerName = elements.titleRunnerName.value.trim().slice(0, 10) || "말썽꾸러기";
-  if (titleRoomMode === "join" && elements.titleRoomCode.value.trim().toUpperCase() === "TEST-SKILL") {
-    startSkillTestRoom(runnerName);
-    return;
-  }
   try {
     await ensureSocketConnected();
     if (activeNetworkRoom) {
@@ -3146,11 +2977,6 @@ async function startFromTitleRoomPanel() {
       }
       const room = await requestNetworkRoom("room:join", { code, name: runnerName });
       applyNetworkRoom(room);
-      if (room.phase === "running") {
-        startNetworkMatch(room);
-        showToast("TEST 방 입장 완료 · 혼자서도 바로 테스트할 수 있어요.");
-        return;
-      }
       showToast(`${room.code} 방에 참가했습니다. 방장 시작을 기다리세요.`);
       return;
     }
@@ -3538,23 +3364,18 @@ const pressedKeys = installInputController({
   canvas: elements.gameCanvas,
   isGameActive: () => gameActive,
   isMatchFinished: () => matchFinished,
-  isPracticeMode: () => gameMode === "practice",
   onAim: updateAimFromPointer,
   onPrimaryAction: () => fireBasicShot(performance.now()),
   onSecondaryAction: () => {
     const now = performance.now();
-    if (gameMode === "track" && isPassiveSkill(equippedSkill)) {
+    if (isPassiveSkill(equippedSkill)) {
       showToast(`${skillLabels[equippedSkill]}은 지급 즉시 자동 적용 중입니다.`);
-    } else if (gameMode === "track") useSkill(equippedSkill, now);
-    else useRandomSkill(now);
+    } else useSkill(equippedSkill, now);
   },
   onEscape: () => {
     if (document.fullscreenElement) void document.exitFullscreen();
     else returnToTitle();
   },
-  onPracticeSkill: (skill) => { useSkill(skill, performance.now()); },
-  onPracticeRandom: () => useRandomSkill(performance.now()),
-  onTrackRandomRejected: () => showToast("랜덤 스킬은 연습장에서 테스트할 수 있다."),
   onInteraction: () => { void audio.unlock(); },
 });
 window.addEventListener("pointerdown", () => { void audio.unlock(); }, { once: true });
