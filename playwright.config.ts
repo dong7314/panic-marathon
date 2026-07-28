@@ -1,5 +1,10 @@
 import { defineConfig, devices } from "@playwright/test";
 
+const webPort = 15174;
+const serverPort = 15175;
+const webUrl = `http://127.0.0.1:${webPort}`;
+const serverUrl = `http://127.0.0.1:${serverPort}`;
+
 export default defineConfig({
   testDir: "./e2e",
   fullyParallel: false,
@@ -10,7 +15,7 @@ export default defineConfig({
   },
   reporter: [["list"]],
   use: {
-    baseURL: "http://127.0.0.1:5174",
+    baseURL: webUrl,
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
   },
@@ -26,10 +31,13 @@ export default defineConfig({
   webServer: [
     {
       command: "npm run start",
-      url: "http://127.0.0.1:5175/health",
-      reuseExistingServer: true,
+      url: `${serverUrl}/healthz`,
+      reuseExistingServer: false,
       timeout: 30_000,
       env: {
+        HOST: "127.0.0.1",
+        PORT: String(serverPort),
+        CLIENT_ORIGIN: webUrl,
         MATCH_COUNTDOWN_MS: "900",
         MATCH_TIME_LIMIT_MS: "30000",
         MAX_ROOMS: "20",
@@ -37,10 +45,13 @@ export default defineConfig({
       },
     },
     {
-      command: "npm run vite",
-      url: "http://127.0.0.1:5174",
-      reuseExistingServer: true,
+      command: `vite --host 127.0.0.1 --port ${webPort} --strictPort`,
+      url: webUrl,
+      reuseExistingServer: false,
       timeout: 30_000,
+      env: {
+        VITE_MULTIPLAYER_URL: serverUrl,
+      },
     },
   ],
 });

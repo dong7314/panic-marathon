@@ -44,6 +44,29 @@ test("two browsers move from room waiting UI through countdown into the race HUD
     await expect(room.guest.locator("#game-screen")).toBeVisible();
     await expect(room.host.locator("#race-board .race-row")).toHaveCount(2);
 
+    await expect(room.host.locator("#game-chat")).toBeVisible();
+    await expect(room.host.locator("#game-chat-messages")).toBeVisible();
+    await expect(room.host.locator("#game-chat-form")).toBeVisible();
+    await expect(room.host.locator("#game-chat-input")).toHaveAttribute("readonly", "");
+    await room.host.keyboard.press("Enter");
+    await expect(room.host.locator("#game-chat")).toHaveClass(/is-open/);
+    await expect(room.host.locator("#game-chat-input")).toBeFocused();
+    await expect(room.host.locator("#game-chat-input")).not.toHaveAttribute("readonly", "");
+    await room.host.locator("#game-chat-input").fill("취소할 메시지");
+    await room.host.locator("#game-chat-input").press("Escape");
+    await expect(room.host.locator("#game-chat")).not.toHaveClass(/is-open/);
+    await expect(room.host.locator("#game-chat-input")).toHaveAttribute("readonly", "");
+    await expect(room.host.locator("#game-chat-form")).toBeVisible();
+
+    await room.host.keyboard.press("Enter");
+    await room.host.locator("#game-chat-input").fill("같이 선두를 잡자!");
+    await room.host.locator("#game-chat-input").press("Enter");
+    await expect(room.host.locator("#game-chat")).not.toHaveClass(/is-open/);
+    await expect(room.host.locator("#game-chat-input")).toHaveAttribute("readonly", "");
+    await expect(room.host.locator("#game-chat-form")).toBeVisible();
+    await expect(room.guest.locator(".game-chat-message")).toContainText("Host");
+    await expect(room.guest.locator(".game-chat-message")).toContainText("같이 선두를 잡자!");
+
     const canvasHasRenderedPixels = await room.host.locator("#game-canvas").evaluate((canvas: HTMLCanvasElement) => {
       const context = canvas.getContext("2d");
       if (!context) return false;
@@ -81,6 +104,118 @@ test("two browsers move from room waiting UI through countdown into the race HUD
   }
 });
 
+test("create room panel shares the join layout and aligns custom map and skill popovers", async ({ page }) => {
+  await page.setViewportSize({ width: 544, height: 906 });
+  await page.goto("/");
+
+  await page.locator("#open-join").click();
+  const joinLogoBox = await page.locator(".title-logo").boundingBox();
+  const joinPanelBox = await page.locator("#title-room-panel").boundingBox();
+  await page.locator("#title-panel-back").click();
+  await page.locator("#open-create").click();
+
+  const logo = page.locator(".title-logo");
+  const panel = page.locator("#title-room-panel");
+  await expect(logo).toBeVisible();
+  await expect(panel).toBeVisible();
+
+  const logoBox = await logo.boundingBox();
+  const panelBox = await panel.boundingBox();
+  expect(logoBox).not.toBeNull();
+  expect(panelBox).not.toBeNull();
+  expect(joinLogoBox).not.toBeNull();
+  expect(joinPanelBox).not.toBeNull();
+  if (logoBox && panelBox && joinLogoBox && joinPanelBox) {
+    expect(Math.abs(logoBox.x - joinLogoBox.x)).toBeLessThanOrEqual(1);
+    expect(Math.abs(logoBox.y - joinLogoBox.y)).toBeLessThanOrEqual(1);
+    expect(Math.abs(logoBox.width - joinLogoBox.width)).toBeLessThanOrEqual(1);
+    expect(Math.abs(panelBox.x - joinPanelBox.x)).toBeLessThanOrEqual(1);
+    expect(Math.abs(panelBox.y + panelBox.height - (joinPanelBox.y + joinPanelBox.height))).toBeLessThanOrEqual(1);
+    expect(logoBox.y + logoBox.height).toBeLessThanOrEqual(panelBox.y);
+    expect(panelBox.width).toBeLessThanOrEqual(440);
+  }
+
+  const runnerInputBox = await page.locator("#title-runner-name").boundingBox();
+  const lapLabelBox = await page.locator('label[for="title-lap-count"]').boundingBox();
+  expect(runnerInputBox).not.toBeNull();
+  expect(lapLabelBox).not.toBeNull();
+  if (runnerInputBox && lapLabelBox) {
+    expect(lapLabelBox.y - (runnerInputBox.y + runnerInputBox.height)).toBeGreaterThanOrEqual(8);
+  }
+
+  const mapSelect = page.locator("#title-map-select");
+  const mapSummary = page.locator("#title-map-select > summary");
+  const skillSelect = page.locator("#title-skill-select");
+  const skillSummary = page.locator("#title-skill-select > summary");
+  await expect(mapSummary).toBeVisible();
+  await expect(skillSummary).toBeVisible();
+  await expect(mapSummary).toContainText("말썽 운동장 · 안전 난간");
+  await expect(skillSummary).toContainText("전체 스킬 · 10개");
+  await expect(page.locator("#title-map-options")).toBeHidden();
+  await expect(page.locator("#title-skill-pool")).toBeHidden();
+
+  const mapLabelBox = await page.locator(".title-map-label").boundingBox();
+  const skillLabelBox = await page.locator(".title-skill-label").boundingBox();
+  const mapSummaryBox = await mapSummary.boundingBox();
+  const skillSummaryBox = await skillSummary.boundingBox();
+  expect(mapLabelBox).not.toBeNull();
+  expect(skillLabelBox).not.toBeNull();
+  expect(mapSummaryBox).not.toBeNull();
+  expect(skillSummaryBox).not.toBeNull();
+  if (mapLabelBox && skillLabelBox && mapSummaryBox && skillSummaryBox) {
+    expect(Math.abs(mapLabelBox.y - skillLabelBox.y)).toBeLessThanOrEqual(1);
+    expect(Math.abs(mapLabelBox.height - skillLabelBox.height)).toBeLessThanOrEqual(1);
+    expect(Math.abs(mapSummaryBox.y - skillSummaryBox.y)).toBeLessThanOrEqual(1);
+    expect(Math.abs(mapSummaryBox.height - skillSummaryBox.height)).toBeLessThanOrEqual(1);
+  }
+
+  await mapSummary.click();
+  await expect(mapSelect).toHaveAttribute("open", "");
+  await expect(page.locator("#title-map-options")).toBeVisible();
+  const mapPopoverBox = await page.locator("#title-map-options").boundingBox();
+  const panelWithMapOpenBox = await panel.boundingBox();
+  expect(mapPopoverBox).not.toBeNull();
+  expect(panelWithMapOpenBox).not.toBeNull();
+  if (panelBox && mapSummaryBox && mapPopoverBox && panelWithMapOpenBox) {
+    expect(Math.abs(panelWithMapOpenBox.height - panelBox.height)).toBeLessThanOrEqual(1);
+    expect(mapPopoverBox.y + mapPopoverBox.height).toBeLessThanOrEqual(mapSummaryBox.y);
+  }
+  await page.getByRole("radio", { name: "우주 정거장 · 트랙 이탈 시 추락" }).check();
+  await expect(page.locator("#title-map-id")).toHaveValue("space-station");
+  await expect(mapSummary).toContainText("우주 정거장 · 트랙 이탈 시 추락");
+  await expect(page.locator("#title-map-options")).toBeHidden();
+
+  await skillSummary.click();
+  await expect(skillSelect).toHaveAttribute("open", "");
+  await expect(page.locator("#title-skill-pool")).toBeVisible();
+
+  const openPanelBox = await panel.boundingBox();
+  const openSummaryBox = await skillSummary.boundingBox();
+  const skillPopoverBox = await page.locator("#title-skill-pool").boundingBox();
+  expect(openPanelBox).not.toBeNull();
+  expect(openSummaryBox).not.toBeNull();
+  expect(skillPopoverBox).not.toBeNull();
+  if (panelBox && openPanelBox && openSummaryBox && skillPopoverBox) {
+    expect(Math.abs(openPanelBox.height - panelBox.height)).toBeLessThanOrEqual(1);
+    expect(skillPopoverBox.y + skillPopoverBox.height).toBeLessThanOrEqual(openSummaryBox.y);
+  }
+
+  const checkboxBox = await page.locator('.title-skill-options input[value="push"]').boundingBox();
+  expect(checkboxBox).not.toBeNull();
+  if (checkboxBox) {
+    expect(checkboxBox.width).toBeLessThanOrEqual(16);
+    expect(checkboxBox.height).toBeLessThanOrEqual(16);
+  }
+  await logo.click();
+  await expect(page.locator("#title-skill-pool")).toBeHidden();
+
+  const taglineFontSize = await page.locator(".title-logo > b").evaluate((element) => (
+    Number.parseFloat(getComputedStyle(element).fontSize)
+  ));
+  expect(taglineFontSize).toBeGreaterThanOrEqual(12);
+  await expect(page.locator("#title-confirm-room")).toBeVisible();
+});
+
 test("jump pads rotate their body and arrow into the launch direction", async ({ page }) => {
   await page.goto("/");
   const layouts = await page.evaluate(async (moduleUrl) => {
@@ -108,9 +243,11 @@ test("room configuration feedback and disconnected runner labels stay clean", as
     const canvas = document.createElement("canvas");
     document.body.append(canvas);
     const calls = { aim: 0, primary: 0, secondary: 0, escape: 0, interaction: 0 };
+    let blocked = false;
     const pressed = installInputController({
       canvas,
       isGameActive: () => true,
+      isInputBlocked: () => blocked,
       isMatchFinished: () => false,
       onAim: () => { calls.aim += 1; },
       onPrimaryAction: () => { calls.primary += 1; },
@@ -125,18 +262,26 @@ test("room configuration feedback and disconnected runner labels stay clean", as
     window.dispatchEvent(new KeyboardEvent("keydown", { code: "KeyW", key: "w", bubbles: true, cancelable: true }));
     const movementRegistered = pressed.has("w");
     window.dispatchEvent(new KeyboardEvent("keyup", { code: "KeyW", key: "w", bubbles: true }));
+    blocked = true;
+    canvas.dispatchEvent(new PointerEvent("pointerdown", { button: 0, bubbles: true, cancelable: true }));
+    window.dispatchEvent(new KeyboardEvent("keydown", { code: "KeyW", key: "w", bubbles: true, cancelable: true }));
+    const blockedInputIgnored = !pressed.has("w") && calls.primary === 1;
     window.dispatchEvent(new KeyboardEvent("keydown", { code: "Escape", key: "Escape", bubbles: true }));
     canvas.remove();
-    return { calls, movementRegistered, movementCleared: !pressed.has("w"), contextMenuPrevented: menu.defaultPrevented };
+    return { calls, movementRegistered, movementCleared: !pressed.has("w"), blockedInputIgnored, contextMenuPrevented: menu.defaultPrevented };
   }, "/src/game/input-controller.ts");
   expect(inputResult).toEqual({
-    calls: { aim: 2, primary: 1, secondary: 1, escape: 1, interaction: 4 },
+    calls: { aim: 2, primary: 1, secondary: 1, escape: 0, interaction: 3 },
     movementRegistered: true,
     movementCleared: true,
+    blockedInputIgnored: true,
     contextMenuPrevented: true,
   });
 
   await validationPage.locator("#open-create").click();
+  await expect(validationPage.locator("#title-skill-pool")).toBeHidden();
+  await validationPage.locator("#title-skill-select > summary").click();
+  await expect(validationPage.locator("#title-skill-pool")).toBeVisible();
   const skillCardMetrics = await validationPage.locator("#title-skill-pool").evaluate((pool) => {
     const cards = [...pool.querySelectorAll("label")].map((label) => label.getBoundingClientRect());
     const checkbox = pool.querySelector<HTMLInputElement>('input[type="checkbox"]')?.getBoundingClientRect();
@@ -147,14 +292,16 @@ test("room configuration feedback and disconnected runner labels stay clean", as
     };
   });
   expect(skillCardMetrics.widths).toHaveLength(1);
-  expect(skillCardMetrics.checkboxWidth).toBe(18);
-  expect(skillCardMetrics.checkboxHeight).toBe(18);
+  expect(skillCardMetrics.checkboxWidth).toBe(16);
+  expect(skillCardMetrics.checkboxHeight).toBe(16);
   const skills = validationPage.locator('#title-skill-pool input[type="checkbox"]');
   for (let index = 2; index < await skills.count(); index += 1) {
     await skills.nth(index).uncheck();
   }
-  await expect(validationPage.locator("#title-skill-count")).toContainText("2개 선택");
+  await expect(validationPage.locator("#title-skill-count")).toContainText("2개 · 최소 3개");
   await expect(validationPage.locator("#title-skill-count")).toHaveClass(/invalid/);
+  await expect(validationPage.locator("#title-skill-select")).toHaveClass(/invalid/);
+  await expect(validationPage.locator("#title-skill-summary")).toContainText("밀치기 · 돌진");
   await validationPage.locator("#title-confirm-room").click();
   await expect(validationPage.locator("#toast")).toHaveClass(/visible/);
   await expect(validationPage.locator("#title-waiting-summary")).toBeHidden();
