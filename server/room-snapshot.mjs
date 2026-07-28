@@ -112,5 +112,6 @@ export function snapshot(room, now = Date.now()) {
       radius: rock.radius,
       remainingMs: Math.max(0, rock.until - now),
     })),
+    chatMessages: room.chatMessages.map((message) => ({ ...message })),
   };
 }

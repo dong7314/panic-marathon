@@ -514,7 +514,7 @@ test("a finished room publishes full standings and lets only the host start a re
       ...process.env,
       PORT: String(port),
       CLIENT_ORIGIN: "http://127.0.0.1:5174",
-      MATCH_TIME_LIMIT_MS: "300",
+      MATCH_TIME_LIMIT_MS: "500",
       MATCH_COUNTDOWN_MS: "120",
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -547,6 +547,13 @@ test("a finished room publishes full standings and lets only the host start a re
   assert.equal(countdown.countdownMs > 0, true);
   assert.equal(started.phase, "running");
   assert.equal(started.round, 1);
+  const bulletHit = onceMatching(
+    guest,
+    "combat:effect",
+    (effect) => effect.kind === "bullet" && effect.sourceId === host.playerId && effect.targetIds.includes(guest.playerId),
+  );
+  host.emit("combat:shoot", { dx: 1, dy: 0 });
+  await bulletHit;
   const [hostResult, guestResult] = await Promise.all([hostFinished, guestFinished]);
   assert.equal(hostResult.phase, "finished");
   assert.equal(hostResult.result.reason, "time-limit");
@@ -556,6 +563,17 @@ test("a finished room publishes full standings and lets only the host start a re
     { place: 2, name: "Alpha" },
   ]);
   assert.deepEqual(guestResult.result, hostResult.result);
+  const hostStanding = hostResult.result.standings.find(({ id }) => id === host.playerId);
+  const guestStanding = hostResult.result.standings.find(({ id }) => id === guest.playerId);
+  assert.deepEqual(
+    {
+      shotsFired: hostStanding.stats.shotsFired,
+      shotsHit: hostStanding.stats.shotsHit,
+      title: hostStanding.title,
+    },
+    { shotsFired: 1, shotsHit: 1, title: "최고의 방해꾼" },
+  );
+  assert.equal(guestStanding.title, "오늘의 우승자");
 
   await assert.rejects(request(guest, "room:rematch"), /방장만 재대결/);
   const guestRestarted = onceMatching(guest, "match:started", (room) => room.code === code && room.round === 2);
@@ -569,6 +587,68 @@ test("a finished room publishes full standings and lets only the host start a re
   assert.equal(restarted.players.every((player) => player.lap === 0 && player.checkpoint === 0), true);
   assert.equal(restarted.players.every((player) => player.actionState === "normal"), true);
   assert.equal(restarted.players.every((player) => player.sleepMs === 0 && player.slowMs === 0 && player.runMs === 0), true);
+});
+
+test("running rooms broadcast sanitized server-authored chat and retain recent history", { timeout: 10_000 }, async (t) => {
+  const port = await reservePort();
+  const server = spawn(process.execPath, ["server/index.mjs"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      PORT: String(port),
+      CLIENT_ORIGIN: "http://127.0.0.1:5174",
+      MATCH_COUNTDOWN_MS: "120",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  await waitForServer(server);
+
+  const url = `http://127.0.0.1:${port}`;
+  const host = await connectClient(url);
+  const guest = await connectClient(url);
+  t.after(() => {
+    host.disconnect();
+    guest.disconnect();
+    server.kill();
+  });
+
+  const code = `PM-C${String(port).slice(-3)}`;
+  await request(host, "room:create", {
+    code,
+    name: "Alpha",
+    config: { lapLimit: 2, playerCount: 2, enabledSkills: ["push", "dash", "run"] },
+  });
+  await request(guest, "room:join", { code, name: "Beta" });
+
+  let waitingMessageReceived = false;
+  guest.once("chat:message", () => { waitingMessageReceived = true; });
+  host.emit("chat:send", { text: "아직 대기 중" });
+  await delay(80);
+  assert.equal(waitingMessageReceived, false);
+
+  const startedEvent = onceMatching(host, "match:started", (room) => room.code === code);
+  await request(host, "room:start");
+  await startedEvent;
+
+  const hostMessage = onceMatching(host, "chat:message", (message) => message.playerId === host.playerId);
+  const guestMessage = onceMatching(guest, "chat:message", (message) => message.playerId === host.playerId);
+  host.emit("chat:send", { text: "  안녕\u0000   모두\n반가워  ", name: "위조 이름" });
+  const [sent, received] = await Promise.all([hostMessage, guestMessage]);
+  assert.deepEqual(
+    { id: sent.id, playerId: sent.playerId, name: sent.name, text: sent.text },
+    { id: "1:0", playerId: host.playerId, name: "Alpha", text: "안녕 모두 반가워" },
+  );
+  assert.deepEqual(received, sent);
+
+  const historySnapshot = onceMatching(
+    guest,
+    "room:state",
+    (room) => room.code === code && room.chatMessages.some((message) => message.id === sent.id),
+  );
+  host.emit("combat:shoot", { dx: 1, dy: 0 });
+  const snapshot = await historySnapshot;
+  assert.equal(snapshot.chatMessages.length, 1);
+  assert.deepEqual(snapshot.chatMessages[0], sent);
 });
 
 test("2, 4, and 6 player rooms start with consistent state and propagate movement", { timeout: 20_000 }, async (t) => {

@@ -47,6 +47,8 @@ export function createRoomState({
     config: sanitizeRoomConfig(config),
     players: new Map(),
     nextJoinOrder: 0,
+    nextChatId: 0,
+    chatMessages: [],
     clones: [],
     projectiles: [],
     rocks: [],

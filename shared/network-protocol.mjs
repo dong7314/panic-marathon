@@ -6,6 +6,7 @@ export const CLIENT_EVENTS = Object.freeze({
   rematchRoom: "room:rematch",
   leaveRoom: "room:leave",
   playerState: "player:state",
+  chatSend: "chat:send",
   combatShoot: "combat:shoot",
   combatSkill: "combat:skill",
 });
@@ -22,6 +23,7 @@ export const SERVER_EVENTS = Object.freeze({
   rockRemove: "hazard:rock:remove",
   raceTeleport: "race:teleport",
   playerState: "player:state",
+  chatMessage: "chat:message",
   combatShot: "combat:shot",
   combatProjectile: "combat:projectile",
   combatGrapple: "combat:grapple",
@@ -58,6 +60,16 @@ export function parseAimPayload(value) {
   const length = Math.hypot(rawX, rawY);
   if (length < .001) return { x: 1, y: 0 };
   return { x: rawX / length, y: rawY / length };
+}
+
+export function parseChatPayload(value) {
+  if (!isRecord(value) || typeof value.text !== "string") return null;
+  const text = value.text
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80);
+  return text ? { text } : null;
 }
 
 export function parseReconnectPayload(value) {

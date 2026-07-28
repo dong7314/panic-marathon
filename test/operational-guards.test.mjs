@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   parseAimPayload,
+  parseChatPayload,
   parsePlayerStatePayload,
   parseReconnectPayload,
 } from "../shared/network-protocol.mjs";
@@ -45,6 +46,15 @@ test("aim payloads are normalized before combat rules consume them", () => {
   assert.deepEqual(parseAimPayload({ dx: 3, dy: 4 }), { x: .6, y: .8 });
   assert.deepEqual(parseAimPayload({ dx: 0, dy: 0 }), { x: 1, y: 0 });
   assert.deepEqual(parseAimPayload({ dx: "invalid", dy: 1 }), { x: 1, y: 0 });
+});
+
+test("chat payloads remove control characters, collapse whitespace, and enforce limits", () => {
+  assert.equal(parseChatPayload(null), null);
+  assert.equal(parseChatPayload({ text: " \n\t " }), null);
+  assert.deepEqual(parseChatPayload({ text: "  안녕\u0000   모두\n반가워  " }), {
+    text: "안녕 모두 반가워",
+  });
+  assert.equal(parseChatPayload({ text: "가".repeat(100) })?.text.length, 80);
 });
 
 test("in-memory room storage enforces its configured capacity", () => {

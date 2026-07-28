@@ -14,7 +14,7 @@
     "multiplayer": "npm run dev",
     "build": "tsc -b && vite build",
     "check": "tsc -b --pretty false",
-    "check:server": "tsc -p tsconfig.server.json --pretty false && node --check server/index.mjs && node --check server/config.mjs && node --check server/http-handler.mjs && node --check server/logger.mjs && node --check server/player-session.mjs && node --check server/room-state.mjs && node --check server/room-store.mjs && node --check server/room-snapshot.mjs && node --check server/socket-guard.mjs && node --check shared/game-rules.mjs && node --check shared/map-catalog.mjs && node --check shared/map-hazards.mjs && node --check shared/map-obstacles.mjs && node --check shared/music-themes.mjs && node --check shared/network-protocol.mjs",
+    "check:server": "tsc -p tsconfig.server.json --pretty false && node --check server/index.mjs && node --check server/config.mjs && node --check server/http-handler.mjs && node --check server/logger.mjs && node --check server/player-session.mjs && node --check server/room-state.mjs && node --check server/room-store.mjs && node --check server/room-snapshot.mjs && node --check server/socket-guard.mjs && node --check shared/game-rules.mjs && node --check shared/map-catalog.mjs && node --check shared/map-hazards.mjs && node --check shared/map-obstacles.mjs && node --check shared/match-stats.mjs && node --check shared/music-themes.mjs && node --check shared/network-protocol.mjs",
     "test": "node --test",
     "test:load": "node --test test/multiplayer-load.test.mjs",
     "test:browser": "playwright test",

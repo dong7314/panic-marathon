@@ -1,6 +1,7 @@
 import type { SkillId } from "./game-rules.mjs";
 import type { GeneratedPitZone, GeneratedSpinner } from "./map-hazards.mjs";
 import type { MapId } from "./map-catalog.mjs";
+import type { MatchStats } from "./match-stats.mjs";
 import type { PlayerActionState } from "./player-state.mjs";
 
 export type NetworkDirection = "down" | "up" | "left" | "right";
@@ -102,6 +103,9 @@ export type NetworkStanding = {
   checkpoint: number;
   completed: boolean;
   finishTimeMs: number | null;
+  title: string;
+  chaosScore: number;
+  stats: MatchStats;
 };
 
 export type NetworkMatchResult = {
@@ -128,6 +132,7 @@ export type NetworkRoom = {
   pitZones: GeneratedPitZone[];
   spinners: GeneratedSpinner[];
   rocks: NetworkRock[];
+  chatMessages: NetworkChatMessage[];
 };
 
 export type NetworkSession = {
@@ -149,6 +154,15 @@ export type PlayerStatePayload = {
   walking?: number;
 };
 export type AimPayload = { dx: number; dy: number; skill?: SkillId };
+export type ChatSendPayload = { text: string };
+export type NetworkChatMessage = {
+  id: string;
+  playerId: string;
+  name: string;
+  color: string;
+  text: string;
+  sentAt: number;
+};
 export type NetworkAck = (response: NetworkResponse) => void;
 
 export type HazardEffect =
@@ -214,6 +228,7 @@ export interface ClientToServerEvents {
   "room:rematch": (callback: NetworkAck) => void;
   "room:leave": () => void;
   "player:state": (payload: PlayerStatePayload) => void;
+  "chat:send": (payload: ChatSendPayload) => void;
   "combat:shoot": (payload: AimPayload) => void;
   "combat:skill": (payload: AimPayload) => void;
 }
@@ -230,6 +245,7 @@ export interface ServerToClientEvents {
   "hazard:rock:remove": (event: NetworkRockRemoval) => void;
   "race:teleport": (event: NetworkTeleport) => void;
   "player:state": (runner: NetworkPlayer) => void;
+  "chat:message": (message: NetworkChatMessage) => void;
   "combat:shot": (shot: NetworkShot) => void;
   "combat:projectile": (projectile: NetworkProjectile) => void;
   "combat:grapple": (grapple: NetworkGrapple) => void;
@@ -245,6 +261,7 @@ export const CLIENT_EVENTS: Readonly<{
   rematchRoom: "room:rematch";
   leaveRoom: "room:leave";
   playerState: "player:state";
+  chatSend: "chat:send";
   combatShoot: "combat:shoot";
   combatSkill: "combat:skill";
 }>;
@@ -261,6 +278,7 @@ export const SERVER_EVENTS: Readonly<{
   rockRemove: "hazard:rock:remove";
   raceTeleport: "race:teleport";
   playerState: "player:state";
+  chatMessage: "chat:message";
   combatShot: "combat:shot";
   combatProjectile: "combat:projectile";
   combatGrapple: "combat:grapple";
@@ -270,4 +288,5 @@ export const SERVER_EVENTS: Readonly<{
 
 export function parsePlayerStatePayload(value: unknown): PlayerStatePayload | null;
 export function parseAimPayload(value: unknown): { x: number; y: number };
+export function parseChatPayload(value: unknown): ChatSendPayload | null;
 export function parseReconnectPayload(value: unknown): NetworkSession | null;

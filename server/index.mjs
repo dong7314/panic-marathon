@@ -59,12 +59,18 @@ import {
 import { getMapDefinition } from "../shared/map-catalog.mjs";
 import { generateMapHazards } from "../shared/map-hazards.mjs";
 import { generateMapObstacles } from "../shared/map-obstacles.mjs";
+import {
+  addMatchAwards,
+  createMatchStats,
+  incrementMatchStat,
+} from "../shared/match-stats.mjs";
 import { canStandOnMap, getTrackFallTarget, pointSegmentDistance } from "../shared/geometry.mjs";
 import { isMovementAllowed } from "../shared/movement-validation.mjs";
 import {
   CLIENT_EVENTS,
   SERVER_EVENTS,
   parseAimPayload,
+  parseChatPayload,
   parsePlayerStatePayload,
   parseReconnectPayload,
 } from "../shared/network-protocol.mjs";
@@ -264,6 +270,7 @@ function addPlayer(room, socket, name) {
     airEndY: spawn.y,
     jumpPadCooldownUntil: 0,
     spinnerImmuneUntil: 0,
+    matchStats: createMatchStats(),
   };
   room.players.set(player.id, player);
   bindPlayerSocket(room, player, socket);
@@ -295,6 +302,7 @@ function resetPlayers(room, now = Date.now()) {
     player.airEndY = spawn.y;
     player.jumpPadCooldownUntil = 0;
     player.spinnerImmuneUntil = 0;
+    player.matchStats = createMatchStats();
   });
 }
 
@@ -362,6 +370,10 @@ function updateSkillProjectiles(room, now) {
         targetIds.push(target.id);
         stateChanged = true;
       }
+    }
+    const source = room.players.get(projectile.sourceId);
+    if (source) {
+      incrementMatchStat(source, projectile.kind === "sleep" ? "sleepHits" : "slowHits", targetIds.length);
     }
     io.to(room.code).emit(SERVER_EVENTS.combatEffect, {
       kind: projectile.kind,
@@ -449,19 +461,21 @@ function buildMatchResult(room, reason, now, winnerId) {
     return left.joinOrder - right.joinOrder;
   });
   const durationMs = Math.max(0, now - room.matchStartedAt);
+  const standings = players.map((player, index) => ({
+    place: index + 1,
+    id: player.id,
+    name: player.name,
+    color: player.color,
+    lap: Math.min(player.lap, room.config.lapLimit),
+    checkpoint: player.checkpoint,
+    completed: player.lap >= room.config.lapLimit,
+    finishTimeMs: player.lap >= room.config.lapLimit ? durationMs : null,
+    stats: player.matchStats,
+  }));
   return {
     reason,
     durationMs,
-    standings: players.map((player, index) => ({
-      place: index + 1,
-      id: player.id,
-      name: player.name,
-      color: player.color,
-      lap: Math.min(player.lap, room.config.lapLimit),
-      checkpoint: player.checkpoint,
-      completed: player.lap >= room.config.lapLimit,
-      finishTimeMs: player.lap >= room.config.lapLimit ? durationMs : null,
-    })),
+    standings: addMatchAwards(standings),
   };
 }
 
@@ -486,6 +500,8 @@ function startRoomMatch(room, now = Date.now()) {
   room.matchStartedAt = now;
   room.clones.length = 0;
   room.projectiles.length = 0;
+  room.chatMessages.length = 0;
+  room.nextChatId = 0;
   resetRoomHazardLayout(room);
   resetRoomHazards(room, now);
   resetRoomRocks(room, now);
@@ -621,16 +637,22 @@ function damagePlayer(room, target, now = Date.now()) {
   if (isDamageImmune(target.skill)) return false;
   target.health -= 1;
   const defeated = target.health <= 0;
-  if (defeated) respawnPlayer(room, target, now);
+  if (defeated) {
+    incrementMatchStat(target, "timesDefeated");
+    respawnPlayer(room, target, now);
+  }
   return defeated;
 }
 
 function flattenPlayerFromRock(target, now = Date.now()) {
   if (isDamageImmune(target.skill)) return false;
   target.health -= 1;
+  const defeated = target.health <= 0;
+  incrementMatchStat(target, "rockHits");
+  if (defeated) incrementMatchStat(target, "timesDefeated");
   enterFlattenedState(target, now + ROCK_SQUASH_DURATION);
   target.lastUpdateAt = now;
-  return target.health <= 0;
+  return defeated;
 }
 
 function bodyTouchesZone(x, y, zone, padding = 0) {
@@ -647,6 +669,7 @@ function playerTouchesZone(player, zone, padding = 0) {
 }
 
 function triggerPitFall(room, player, pit, now) {
+  incrementMatchStat(player, "pitFalls");
   enterFallingState(player, now + PIT_FALL_DURATION);
   player.fallKind = "pit";
   player.fallTargetX = pit.x + pit.width / 2;
@@ -662,6 +685,7 @@ function triggerPitFall(room, player, pit, now) {
 }
 
 function triggerVoidFall(room, player, now) {
+  incrementMatchStat(player, "voidFalls");
   enterFallingState(player, now + PIT_FALL_DURATION);
   player.fallKind = "void";
   const target = getTrackFallTarget(player.x, player.y);
@@ -678,6 +702,7 @@ function triggerVoidFall(room, player, now) {
 }
 
 function triggerJumpPad(room, player, pad, now) {
+  incrementMatchStat(player, "jumpPadsTriggered");
   const startX = player.x;
   const startY = player.y;
   const speed = Math.hypot(pad.pushX, pad.pushY);
@@ -976,6 +1001,7 @@ io.on("connection", (socket) => {
   const allowRoomEvent = () => limiter.allow("room", config.maxRoomEventsPerMinute, 60_000);
   const allowStateEvent = () => limiter.allow("state", config.maxStateEventsPerSecond);
   const allowCombatEvent = () => limiter.allow("combat", config.maxCombatEventsPerSecond);
+  const allowChatEvent = () => limiter.allow("chat", 6, 5_000);
   socket.once("disconnect", () => connectionRegistry.release(socket.data.guardAddress));
 
   socket.on(CLIENT_EVENTS.createRoom, (payload, callback) => {
@@ -1172,6 +1198,25 @@ io.on("connection", (socket) => {
     socket.to(room.code).emit(SERVER_EVENTS.playerState, publicPlayer(player, room));
   });
 
+  socket.on(CLIENT_EVENTS.chatSend, (payload) => {
+    if (!allowChatEvent()) return;
+    const room = rooms.get(socket.data.roomCode);
+    const sender = room?.players.get(socket.data.playerId);
+    const parsed = parseChatPayload(payload);
+    if (!room || room.phase !== "running" || !sender?.connected || !parsed) return;
+    const message = {
+      id: `${room.round}:${room.nextChatId++}`,
+      playerId: sender.id,
+      name: sender.name,
+      color: sender.color,
+      text: parsed.text,
+      sentAt: Date.now(),
+    };
+    room.chatMessages.push(message);
+    if (room.chatMessages.length > 30) room.chatMessages.splice(0, room.chatMessages.length - 30);
+    io.to(room.code).emit(SERVER_EVENTS.chatMessage, message);
+  });
+
   socket.on(CLIENT_EVENTS.combatShoot, (payload) => {
     if (!allowCombatEvent()) return;
     const room = rooms.get(socket.data.roomCode);
@@ -1180,9 +1225,12 @@ io.on("connection", (socket) => {
     if (!room || room.phase !== "running" || !attacker || !canPlayerAct(attacker, now) || attacker.nextShotAt > now || attacker.ammo <= 0) return;
     const aim = parseAimPayload(payload);
     attacker.ammo -= 1;
+    incrementMatchStat(attacker, "shotsFired");
     attacker.nextShotAt = now + 210;
     const target = findTarget(room, attacker, aim, 230, .82, now);
     const defeated = target ? damagePlayer(room, target, now) : false;
+    if (target) incrementMatchStat(attacker, "shotsHit");
+    if (defeated) incrementMatchStat(attacker, "eliminations");
     io.to(room.code).emit(SERVER_EVENTS.combatShot, { sourceId: attacker.id, x: attacker.x + aim.x * 8, y: attacker.y + aim.y * 2, dx: aim.x, dy: aim.y });
     io.to(room.code).emit(SERVER_EVENTS.combatEffect, { kind: "bullet", sourceId: attacker.id, targetIds: target ? [target.id] : [], defeated });
     broadcastRoom(room);
@@ -1227,6 +1275,7 @@ io.on("connection", (socket) => {
           duration: PUSH_DURATION,
         });
       }
+      incrementMatchStat(attacker, "pushHits", targetIds.length);
       attacker.nextSkillAt = now + 2600;
     } else if (skill === "grab") {
       const target = findTargetOnAimLine(room, attacker, aim, GRAB_RANGE, GRAB_HIT_RADIUS, now);
@@ -1254,6 +1303,7 @@ io.on("connection", (socket) => {
           targetEndY: target.y,
         });
       }
+      incrementMatchStat(attacker, "grabHits", targetIds.length);
       enterDisplacementState(attacker, "grappled", now + 520);
       io.to(room.code).emit(SERVER_EVENTS.combatGrapple, grapple);
       attacker.nextSkillAt = now + 3800;
@@ -1289,6 +1339,7 @@ io.on("connection", (socket) => {
           until: now + CLONE_DURATION,
         };
         room.clones.push(clone);
+        incrementMatchStat(attacker, "clonesCreated");
         for (const target of room.players.values()) {
           if (!target.connected || target.id === attacker.id) continue;
           if (!canPlayerBeDisplaced(target, now)) continue;
