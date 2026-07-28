@@ -70,12 +70,14 @@ import type {
   HazardEffect,
   LabelledRunner,
   NetworkClone,
+  NetworkChatMessage,
   NetworkHazards,
   NetworkPlayer,
   NetworkResponse,
   NetworkRock,
   NetworkRoom,
   NetworkSession,
+  NetworkStanding,
   Pit,
   Player,
   Projectile,
@@ -124,26 +126,42 @@ app.innerHTML = `
           </div>
           <div class="title-create-fields">
             <div class="title-config-grid"><label for="title-lap-count">목표 랩 <input id="title-lap-count" type="number" min="1" max="999" step="1" value="5" /></label><label for="title-player-count">인원 <input id="title-player-count" type="number" min="2" max="6" step="1" value="4" /></label></div>
-            <label for="title-invite-code">초대 코드</label>
-            <input id="title-invite-code" maxlength="12" value="PM-7F2A" autocomplete="off" />
-            <label for="title-map-id">맵 선택</label>
-            <select id="title-map-id">
-              <option value="schoolyard">말썽 운동장 · 안전 난간</option>
-              <option value="space-station">우주 정거장 · 트랙 이탈 시 추락</option>
-              <option value="mountain-pass">우당탕 산맥 · 직선 오르막과 낙석</option>
-            </select>
-            <span class="title-skill-label">사용 스킬 <b id="title-skill-count" aria-live="polite">10개 선택 · 최소 3개</b></span>
-            <div id="title-skill-pool" class="title-skill-options">
-              <label><input type="checkbox" value="push" checked /><span>밀치기</span></label>
-              <label><input type="checkbox" value="dash" checked /><span>돌진</span></label>
-              <label><input type="checkbox" value="run" checked /><span>질주</span></label>
-              <label><input type="checkbox" value="grab" checked /><span>그랩</span></label>
-              <label><input type="checkbox" value="clone" checked /><span>분신</span></label>
-              <label><input type="checkbox" value="slow" checked /><span>슬로우탄</span></label>
-              <label><input type="checkbox" value="sleep" checked /><span>수면총</span></label>
-              <label><input type="checkbox" value="fly" checked /><span>공중부양</span></label>
-              <label><input type="checkbox" value="slow30" checked /><span>속도 30%</span></label>
-              <label><input type="checkbox" value="giant" checked /><span>5배 거대화</span></label>
+            <label class="title-invite-field" for="title-invite-code">초대 코드
+              <input id="title-invite-code" maxlength="12" value="PM-7F2A" autocomplete="off" />
+            </label>
+            <div class="title-map-field">
+              <span class="title-map-label">맵 선택</span>
+              <input id="title-map-id" type="hidden" value="schoolyard" />
+              <details id="title-map-select" class="title-popover-select title-map-select">
+                <summary aria-controls="title-map-options">
+                  <span id="title-map-summary">말썽 운동장 · 안전 난간</span>
+                </summary>
+                <div id="title-map-options" class="title-map-options" role="radiogroup" aria-label="플레이할 맵">
+                  <label><input type="radio" name="title-map" value="schoolyard" checked /><span>말썽 운동장 · 안전 난간</span></label>
+                  <label><input type="radio" name="title-map" value="space-station" /><span>우주 정거장 · 트랙 이탈 시 추락</span></label>
+                  <label><input type="radio" name="title-map" value="mountain-pass" /><span>우당탕 산맥 · 직선 오르막과 낙석</span></label>
+                </div>
+              </details>
+            </div>
+            <div class="title-skill-field">
+              <span class="title-skill-label">사용 스킬 <b id="title-skill-count" aria-live="polite">10개 · 최소 3개</b></span>
+              <details id="title-skill-select" class="title-popover-select title-skill-select">
+                <summary aria-controls="title-skill-pool">
+                  <span id="title-skill-summary">전체 스킬 · 10개</span>
+                </summary>
+                <div id="title-skill-pool" class="title-skill-options" role="group" aria-label="사용할 스킬">
+                  <label><input type="checkbox" value="push" checked /><span>밀치기</span></label>
+                  <label><input type="checkbox" value="dash" checked /><span>돌진</span></label>
+                  <label><input type="checkbox" value="run" checked /><span>질주</span></label>
+                  <label><input type="checkbox" value="grab" checked /><span>그랩</span></label>
+                  <label><input type="checkbox" value="clone" checked /><span>분신</span></label>
+                  <label><input type="checkbox" value="slow" checked /><span>슬로우탄</span></label>
+                  <label><input type="checkbox" value="sleep" checked /><span>수면총</span></label>
+                  <label><input type="checkbox" value="fly" checked /><span>공중부양</span></label>
+                  <label><input type="checkbox" value="slow30" checked /><span>속도 30%</span></label>
+                  <label><input type="checkbox" value="giant" checked /><span>5배 거대화</span></label>
+                </div>
+              </details>
             </div>
           </div>
           <div id="title-waiting-summary" class="title-waiting-summary hidden">
@@ -179,7 +197,17 @@ app.innerHTML = `
             <button id="audio-button" class="frame-button audio-button" type="button" aria-pressed="false">소리 ON</button>
           </div>
           <div id="race-board" class="race-board" aria-label="레이스 현황"></div>
-          <div class="message-box"><span class="key">WASD</span> 이동 · <span class="key">L-CLICK</span> 총 · <span class="key">R-CLICK</span> 현재 스킬 · 체크포인트에서 탄창과 스킬을 갱신합니다.</div>
+          <section id="game-chat" class="game-chat is-empty" aria-label="방 채팅">
+            <div id="game-chat-messages" class="game-chat-messages" role="log" aria-live="polite" aria-relevant="additions">
+              <p class="game-chat-empty">아직 메시지가 없습니다 · ENTER로 채팅</p>
+            </div>
+            <form id="game-chat-form" class="game-chat-form">
+              <label for="game-chat-input">CHAT</label>
+              <input id="game-chat-input" maxlength="80" autocomplete="off" placeholder="Enter를 눌러 채팅" readonly aria-disabled="true" tabindex="-1" />
+              <span id="game-chat-hint">ENTER 입력</span>
+            </form>
+          </section>
+          <div class="message-box"><span class="key">WASD</span> 이동 · <span class="key">L-CLICK</span> 총 · <span class="key">R-CLICK</span> 현재 스킬 · <span class="key">ENTER</span> 채팅</div>
           <div id="skill-bar" class="skill-bar" aria-label="스킬 단축키"></div>
           <aside class="game-menu-actions">
             <button id="back-to-lobby" class="ghost-button">게임 나가기</button>
@@ -238,9 +266,14 @@ const elements = {
   titleRunnerName: getElement<HTMLInputElement>("#title-runner-name"),
   titleLapCount: getElement<HTMLInputElement>("#title-lap-count"),
   titlePlayerCount: getElement<HTMLInputElement>("#title-player-count"),
-  titleMapId: getElement<HTMLSelectElement>("#title-map-id"),
+  titleMapId: getElement<HTMLInputElement>("#title-map-id"),
+  titleMapSelect: getElement<HTMLDetailsElement>("#title-map-select"),
+  titleMapSummary: getElement<HTMLElement>("#title-map-summary"),
+  titleMapOptions: getElement<HTMLElement>("#title-map-options"),
   titleInviteCode: getElement<HTMLInputElement>("#title-invite-code"),
   titleSkillCount: getElement<HTMLElement>("#title-skill-count"),
+  titleSkillSelect: getElement<HTMLDetailsElement>("#title-skill-select"),
+  titleSkillSummary: getElement<HTMLElement>("#title-skill-summary"),
   titleSkillPool: getElement<HTMLElement>("#title-skill-pool"),
   titleConfirm: getElement<HTMLButtonElement>("#title-confirm-room"),
   titlePanelBack: getElement<HTMLButtonElement>("#title-panel-back"),
@@ -253,6 +286,11 @@ const elements = {
   audio: getElement<HTMLButtonElement>("#audio-button"),
   raceBoard: getElement<HTMLElement>("#race-board"),
   skillBar: getElement<HTMLElement>("#skill-bar"),
+  gameChat: getElement<HTMLElement>("#game-chat"),
+  gameChatMessages: getElement<HTMLElement>("#game-chat-messages"),
+  gameChatForm: getElement<HTMLFormElement>("#game-chat-form"),
+  gameChatInput: getElement<HTMLInputElement>("#game-chat-input"),
+  gameChatHint: getElement<HTMLElement>("#game-chat-hint"),
   results: getElement<HTMLElement>("#match-results"),
   resultTitle: getElement<HTMLElement>("#result-title"),
   resultSummary: getElement<HTMLElement>("#result-summary"),
@@ -308,6 +346,8 @@ let grappleLockUntil = 0;
 let pushLockUntil = 0;
 let networkSpinnerElapsedAtSync = 0;
 let networkSpinnerSyncedAt = 0;
+let networkChatMessages: NetworkChatMessage[] = [];
+let chatMessageSignature = "";
 const matchCountdown = new MatchCountdown();
 const clones: Clone[] = [];
 const projectiles: Projectile[] = [];
@@ -972,6 +1012,7 @@ function finishMatch(winner: string, reason: "completed" | "time-limit" = "compl
   matchFinished = true;
   audio.play("finish");
   pressedKeys.clear();
+  closeGameChat(false);
   showToast(reason === "time-limit"
     ? `★ 시간 종료! ${winner}이(가) 현재 순위 1위입니다. ★`
     : `★ ${winner} 승리! ${roomConfig.lapLimit}랩을 가장 먼저 완주했습니다. ★`);
@@ -992,6 +1033,96 @@ function hideMatchResults() {
   elements.resultRematch.disabled = false;
 }
 
+function isGameChatOpen() {
+  return elements.gameChat.classList.contains("is-open");
+}
+
+function renderGameChat() {
+  const visibleMessages = networkChatMessages.slice(-6);
+  const signature = visibleMessages.map((message) => message.id).join("|");
+  if (signature === chatMessageSignature) return;
+  chatMessageSignature = signature;
+  elements.gameChatMessages.replaceChildren();
+  if (visibleMessages.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "game-chat-empty";
+    empty.textContent = "아직 메시지가 없습니다 · ENTER로 채팅";
+    elements.gameChatMessages.append(empty);
+  }
+  for (const message of visibleMessages) {
+    const row = document.createElement("p");
+    row.className = "game-chat-message";
+    if (message.playerId === getLocalNetworkPlayerId()) row.classList.add("me");
+    const name = document.createElement("strong");
+    name.textContent = message.name;
+    name.style.color = message.color;
+    const text = document.createElement("span");
+    text.textContent = message.text;
+    row.append(name, text);
+    elements.gameChatMessages.append(row);
+  }
+  elements.gameChat.classList.toggle("is-empty", visibleMessages.length === 0);
+  elements.gameChatMessages.scrollTop = elements.gameChatMessages.scrollHeight;
+}
+
+function syncGameChat(messages: NetworkChatMessage[] = []) {
+  networkChatMessages = messages.slice(-30);
+  renderGameChat();
+}
+
+function receiveGameChatMessage(message: NetworkChatMessage) {
+  if (!multiplayerActive || !gameActive || activeNetworkRoom?.phase !== "running") return;
+  if (networkChatMessages.some((current) => current.id === message.id)) return;
+  networkChatMessages.push(message);
+  if (networkChatMessages.length > 30) networkChatMessages.splice(0, networkChatMessages.length - 30);
+  renderGameChat();
+}
+
+function closeGameChat(focusCanvas = true) {
+  elements.gameChat.classList.remove("is-open");
+  elements.gameChatInput.value = "";
+  elements.gameChatInput.readOnly = true;
+  elements.gameChatInput.tabIndex = -1;
+  elements.gameChatInput.placeholder = "Enter를 눌러 채팅";
+  elements.gameChatInput.setAttribute("aria-disabled", "true");
+  elements.gameChatHint.textContent = "ENTER 입력";
+  if (focusCanvas && gameActive) elements.gameCanvas.focus();
+}
+
+function openGameChat() {
+  if (!multiplayerActive || !gameActive || matchFinished || activeNetworkRoom?.phase !== "running") return;
+  pressedKeys.clear();
+  elements.gameChat.classList.add("is-open");
+  elements.gameChatInput.readOnly = false;
+  elements.gameChatInput.tabIndex = 0;
+  elements.gameChatInput.placeholder = "메시지를 입력하세요";
+  elements.gameChatInput.removeAttribute("aria-disabled");
+  elements.gameChatHint.textContent = "ENTER 전송 · ESC 닫기";
+  window.setTimeout(() => elements.gameChatInput.focus(), 0);
+}
+
+function sendGameChat() {
+  if (!isGameChatOpen()) return;
+  const text = elements.gameChatInput.value.trim();
+  if (text) socket.emit(CLIENT_EVENTS.chatSend, { text });
+  closeGameChat();
+}
+
+function formatStandingStats(standing: NetworkStanding) {
+  const stats = standing.stats;
+  const falls = stats.pitFalls + stats.voidFalls;
+  return [
+    ["명중", `${stats.shotsHit}/${stats.shotsFired}`],
+    ["처치", stats.eliminations],
+    ["밀침", stats.pushHits],
+    ["그랩", stats.grabHits],
+    ["수면", stats.sleepHits],
+    ["감속", stats.slowHits],
+    ["분신", stats.clonesCreated],
+    ["낙하", falls],
+  ].map(([label, value]) => `<span><b>${label}</b>${value}</span>`).join("");
+}
+
 function showNetworkResults(room: NetworkRoom) {
   const result = room.result;
   if (!result || result.standings.length === 0) {
@@ -1009,7 +1140,16 @@ function showNetworkResults(room: NetworkRoom) {
   elements.resultStandings.innerHTML = result.standings.map((standing) => {
     const checkpoint = standing.checkpoint < checkpoints.length ? `CP${standing.checkpoint + 1}` : "START";
     const progress = standing.completed ? "완주" : `${standing.lap}/${room.config.lapLimit} · ${checkpoint}`;
-    return `<li class="result-row${standing.id === playerId ? " me" : ""}"><span class="result-place">${standing.place}</span><i class="race-dot" style="background:${standing.color}"></i><span class="result-name">${escapeMarkup(standing.name)}</span><span class="result-progress">${progress}</span></li>`;
+    return `<li class="result-row${standing.id === playerId ? " me" : ""}">
+      <span class="result-place">${standing.place}</span>
+      <i class="race-dot" style="background:${standing.color}"></i>
+      <span class="result-runner">
+        <strong class="result-name">${escapeMarkup(standing.name)}</strong>
+        <em class="result-title">《 ${escapeMarkup(standing.title)} 》</em>
+      </span>
+      <span class="result-progress">${progress}</span>
+      <span class="result-stats">${formatStandingStats(standing)}</span>
+    </li>`;
   }).join("");
   elements.resultRematch.classList.toggle("hidden", !isHost);
   elements.resultRematch.disabled = connectedPlayers < 2;
@@ -1693,6 +1833,7 @@ function updateNetworkWaitingPanel() {
   const isHost = activeNetworkRoom.hostId === getLocalNetworkPlayerId();
   const countingDown = activeNetworkRoom.countdownMs > 0;
   const connectedPlayers = countConnectedPlayers(activeNetworkRoom);
+  elements.titleRoomPanel.classList.remove("create-mode");
   elements.titleRoomPanel.classList.add("network-waiting");
   elements.titleWaitingSummary.classList.remove("hidden");
   elements.titlePanelMarker.textContent = "ONLINE ROOM";
@@ -1735,6 +1876,7 @@ function updateNetworkWaitingPanel() {
 
 function applyNetworkRoom(room: NetworkRoom) {
   activeNetworkRoom = room;
+  syncGameChat(room.chatMessages ?? []);
   syncNetworkCountdown(room);
   roomConfig = room.config;
   applyMapDefinition(room.config.mapId);
@@ -1856,7 +1998,6 @@ function restoreNetworkRoom(room: NetworkRoom) {
   elements.titleRoomPanel.classList.remove("hidden", "create-mode");
   elements.titleRoomPanel.classList.add("network-waiting");
   elements.titleStage.classList.add("room-panel-open");
-  elements.titleStage.classList.remove("create-panel-open");
   applyNetworkRoom(room);
   showToast(`${room.code} 대기실에 다시 연결했습니다.`);
 }
@@ -1924,11 +2065,28 @@ function readRoomConfig(): RoomConfig | undefined {
 }
 
 function updateSkillPoolSummary() {
-  const selectedCount = elements.titleSkillPool.querySelectorAll<HTMLInputElement>('input[type="checkbox"]:checked').length;
+  const selectedSkills = [...elements.titleSkillPool.querySelectorAll<HTMLInputElement>('input[type="checkbox"]:checked')];
+  const selectedCount = selectedSkills.length;
+  const selectedLabels = selectedSkills.map((input) => (
+    input.closest("label")?.querySelector("span")?.textContent?.trim() || input.value
+  ));
   const invalid = selectedCount < 3;
-  elements.titleSkillCount.textContent = `${selectedCount}개 선택 · 최소 3개`;
+  elements.titleSkillCount.textContent = `${selectedCount}개 · 최소 3개`;
+  elements.titleSkillSummary.textContent = selectedCount === 10
+    ? "전체 스킬 · 10개"
+    : selectedCount <= 2
+      ? selectedLabels.join(" · ") || "선택된 스킬 없음"
+      : `${selectedLabels.slice(0, 2).join(" · ")} 외 ${selectedCount - 2}개`;
   elements.titleSkillCount.classList.toggle("invalid", invalid);
-  elements.titleSkillPool.classList.toggle("invalid", invalid);
+  elements.titleSkillSelect.classList.toggle("invalid", invalid);
+}
+
+function updateMapSelection() {
+  const selected = elements.titleMapOptions.querySelector<HTMLInputElement>('input[type="radio"]:checked');
+  const mapId = selected && isMapId(selected.value) ? selected.value : DEFAULT_MAP_ID;
+  const selectedLabel = selected?.closest("label")?.querySelector("span")?.textContent?.trim();
+  elements.titleMapId.value = mapId;
+  elements.titleMapSummary.textContent = selectedLabel || getMapDefinition(mapId).name;
 }
 
 function startNetworkMatch(room: NetworkRoom) {
@@ -1984,6 +2142,7 @@ function startNetworkMatch(room: NetworkRoom) {
   clones.length = 0;
   syncNetworkClones(room);
   syncNetworkRocks(room);
+  syncGameChat(room.chatMessages ?? []);
   projectiles.length = 0;
   slowImpacts.length = 0;
   (Object.keys(skillReadyAt) as SkillId[]).forEach((id) => { skillReadyAt[id] = 0; });
@@ -2032,6 +2191,8 @@ function returnToTitle() {
   gameActive = false;
   aim.visible = false;
   pressedKeys.clear();
+  closeGameChat(false);
+  syncGameChat();
   if (document.fullscreenElement) void document.exitFullscreen();
   elements.toast.classList.remove("visible");
   elements.toast.textContent = "";
@@ -2090,13 +2251,14 @@ async function copyActiveRoomCode() {
 
 function openTitleRoomPanel(mode: TitleRoomMode) {
   titleRoomMode = mode;
+  elements.titleMapSelect.open = false;
+  elements.titleSkillSelect.open = false;
   elements.titleRoomPanel.classList.remove("hidden");
   elements.titleRoomPanel.classList.remove("network-waiting");
   elements.titleWaitingSummary.classList.add("hidden");
   elements.titleRoomShare.classList.add("hidden");
   elements.titleRoomPanel.classList.toggle("create-mode", mode === "create");
   elements.titleStage.classList.add("room-panel-open");
-  elements.titleStage.classList.toggle("create-panel-open", mode === "create");
   elements.titleConfirm.disabled = false;
   if (mode === "join") {
     elements.titlePanelMarker.textContent = "JOIN ROOM";
@@ -2121,13 +2283,14 @@ function closeTitleRoomPanel() {
   if (!gameActive) activeNetworkRound = 0;
   if (!gameActive) clearNetworkCountdown();
   remotePlayers.clear();
+  elements.titleMapSelect.open = false;
+  elements.titleSkillSelect.open = false;
   elements.titleRoomPanel.classList.add("hidden");
   elements.titleRoomPanel.classList.remove("network-waiting");
   elements.titleWaitingSummary.classList.add("hidden");
   elements.titleRoomShare.classList.add("hidden");
   elements.titleConfirm.disabled = false;
   elements.titleStage.classList.remove("room-panel-open");
-  elements.titleStage.classList.remove("create-panel-open");
 }
 
 async function startFromTitleRoomPanel() {
@@ -2347,7 +2510,26 @@ elements.titleConfirm.addEventListener("click", () => { void startFromTitleRoomP
 elements.titlePanelBack.addEventListener("click", closeTitleRoomPanel);
 elements.titleRoomCode.addEventListener("keydown", (event) => { if (event.key === "Enter") void startFromTitleRoomPanel(); });
 elements.titleInviteCode.addEventListener("keydown", (event) => { if (event.key === "Enter") void startFromTitleRoomPanel(); });
+elements.titleMapOptions.addEventListener("change", () => {
+  updateMapSelection();
+  elements.titleMapSelect.open = false;
+  elements.titleMapSelect.querySelector("summary")?.focus();
+});
 elements.titleSkillPool.addEventListener("change", updateSkillPoolSummary);
+for (const popover of [elements.titleMapSelect, elements.titleSkillSelect]) {
+  popover.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || !popover.open) return;
+    event.preventDefault();
+    popover.open = false;
+    popover.querySelector("summary")?.focus();
+  });
+}
+document.addEventListener("pointerdown", (event) => {
+  if (!(event.target instanceof Node)) return;
+  for (const popover of [elements.titleMapSelect, elements.titleSkillSelect]) {
+    if (popover.open && !popover.contains(event.target)) popover.open = false;
+  }
+});
 elements.titleCopyRoomCode.addEventListener("click", () => { void copyActiveRoomCode(); });
 elements.back.addEventListener("click", returnToTitle);
 elements.fullscreen.addEventListener("click", () => { void toggleFullscreen(); });
@@ -2359,7 +2541,31 @@ elements.audio.addEventListener("click", () => {
 });
 elements.audio.textContent = audio.muted ? "소리 OFF" : "소리 ON";
 elements.audio.setAttribute("aria-pressed", String(audio.muted));
+updateMapSelection();
 updateSkillPoolSummary();
+elements.gameChatForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  sendGameChat();
+});
+elements.gameChatInput.addEventListener("keydown", (event) => {
+  if (event.isComposing) return;
+  if (event.key === "Enter") {
+    event.preventDefault();
+    event.stopPropagation();
+    sendGameChat();
+  } else if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    closeGameChat();
+  }
+});
+window.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || event.repeat || event.target === elements.gameChatInput) return;
+  if (!multiplayerActive || !gameActive || matchFinished || activeNetworkRoom?.phase !== "running") return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  openGameChat();
+}, true);
 elements.resultRematch.addEventListener("click", () => { void startNetworkRematch(); });
 elements.resultToTitle.addEventListener("click", returnToTitle);
 
@@ -2373,6 +2579,7 @@ socket.on(SERVER_EVENTS.matchStarted, (room) => {
   startNetworkMatch(room);
 });
 socket.on(SERVER_EVENTS.matchFinished, (room) => applyNetworkRoom(room));
+socket.on(SERVER_EVENTS.chatMessage, (message) => receiveGameChatMessage(message));
 socket.on(SERVER_EVENTS.hazardWarning, (hazards) => {
   syncNetworkHazards(hazards);
   showToast("구덩이 경고! 잠시 후 열린다.");
@@ -2537,6 +2744,7 @@ function updateAimFromPointer(event: PointerEvent) {
 const pressedKeys = installInputController({
   canvas: elements.gameCanvas,
   isGameActive: () => gameActive,
+  isInputBlocked: isGameChatOpen,
   isMatchFinished: () => matchFinished,
   onAim: updateAimFromPointer,
   onPrimaryAction: () => fireBasicShot(performance.now()),

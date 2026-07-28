@@ -2,6 +2,7 @@ import type { SkillId } from "../../shared/game-rules.mjs";
 import type {
   HazardEffect,
   NetworkClone,
+  NetworkChatMessage,
   NetworkDirection,
   NetworkHazards,
   NetworkMatchResult,
@@ -19,6 +20,7 @@ import type {
 export type {
   HazardEffect,
   NetworkClone,
+  NetworkChatMessage,
   NetworkHazards,
   NetworkMatchResult,
   NetworkObstacle,

@@ -1,6 +1,7 @@
 type InputControllerOptions = {
   canvas: HTMLCanvasElement;
   isGameActive: () => boolean;
+  isInputBlocked?: () => boolean;
   isMatchFinished: () => boolean;
   onAim: (event: PointerEvent) => void;
   onPrimaryAction: () => void;
@@ -35,6 +36,7 @@ export function installInputController(options: InputControllerOptions) {
   const {
     canvas,
     isGameActive,
+    isInputBlocked = () => false,
     isMatchFinished,
     onAim,
     onPrimaryAction,
@@ -47,7 +49,7 @@ export function installInputController(options: InputControllerOptions) {
     if (isGameActive()) onAim(event);
   });
   canvas.addEventListener("pointerdown", (event) => {
-    if (!isGameActive() || (event.button !== 0 && event.button !== 2) || isMatchFinished()) return;
+    if (!isGameActive() || isInputBlocked() || (event.button !== 0 && event.button !== 2) || isMatchFinished()) return;
     event.preventDefault();
     onInteraction();
     onAim(event);
@@ -60,6 +62,7 @@ export function installInputController(options: InputControllerOptions) {
   window.addEventListener("keydown", (event) => {
     const key = controlKey(event);
     if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement || event.target instanceof HTMLTextAreaElement) return;
+    if (isInputBlocked()) return;
     onInteraction();
     if (key === "escape" && isGameActive()) {
       onEscape();
