@@ -94,6 +94,7 @@ import "./style.css";
 
 const VIEW_WIDTH = 384;
 const VIEW_HEIGHT = 216;
+const GAME_GUIDE_STORAGE_KEY = "panic-marathon:game-guide-seen-v1";
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("앱을 찾을 수 없어요.");
@@ -106,12 +107,25 @@ app.innerHTML = `
         <canvas id="title-canvas" width="384" height="216" aria-hidden="true"></canvas>
         <div class="scanlines" aria-hidden="true"></div>
         <div class="title-logo">
+          <span class="title-copyright">© 2026 eaea7314@gmail.com</span>
           <h1 id="title-logo" aria-label="패닉 마라톤"><span class="title-word title-word-panic"><i style="--wave-delay: 0">패</i><i style="--wave-delay: 1">닉</i></span><span class="title-word title-word-marathon"><i style="--wave-delay: 2">마</i><i style="--wave-delay: 3">라</i><i style="--wave-delay: 4">톤</i></span></h1>
           <b>달리고 · 쏘고 · 서로 끌어내려라</b>
         </div>
+        <section class="title-audio-control" aria-label="사운드 설정">
+          <button id="title-audio-toggle" type="button" aria-pressed="false">
+            <span class="title-audio-icon" aria-hidden="true">♪</span>
+            <span id="title-audio-state">소리 ON</span>
+          </button>
+          <label for="title-volume">
+            <span>VOL</span>
+            <input id="title-volume" type="range" min="0" max="100" step="5" value="100" />
+            <output id="title-volume-value" for="title-volume">100%</output>
+          </label>
+        </section>
         <div class="title-actions" aria-label="게임 시작 메뉴">
           <button id="open-join" class="title-action primary"><span>01</span> 방 참여하기</button>
           <button id="open-create" class="title-action"><span>02</span> 방 생성하기</button>
+          <button id="open-guide" class="title-action title-action-guide"><span>03</span> 게임 방법</button>
         </div>
         <section id="title-room-panel" class="title-room-panel hidden" aria-label="방 설정">
           <div class="title-panel-heading"><span id="title-panel-marker">ROOM MENU</span><b id="title-panel-title">방 참여하기</b></div>
@@ -184,6 +198,67 @@ app.innerHTML = `
       </div>
     </main>
 
+    <section id="game-guide" class="game-guide hidden" role="dialog" aria-modal="true" aria-labelledby="game-guide-title" aria-describedby="game-guide-summary">
+      <div class="game-guide-card">
+        <header class="game-guide-header">
+          <span>HOW TO PLAY · 2–6 PLAYERS</span>
+          <button id="game-guide-close" type="button" aria-label="게임 방법 닫기">닫기 ×</button>
+        </header>
+
+        <div class="game-guide-hero">
+          <span class="game-guide-kicker">1등만 살아남는 방해 레이스</span>
+          <h2 id="game-guide-title">빠르게 달리고,<br />더 영리하게 방해하세요.</h2>
+          <p id="game-guide-summary">패닉 마라톤은 단순한 달리기 게임이 아닙니다. 체크포인트를 순서대로 통과하면서 총과 랜덤 스킬로 선두를 끌어내리고, 가장 먼저 목표 랩을 완주한 단 한 명이 승리합니다.</p>
+        </div>
+
+        <ol class="game-guide-flow" aria-label="경기 진행 방법">
+          <li>
+            <b>01 · 달린다</b>
+            <strong>체크포인트를 순서대로 통과</strong>
+            <p>WASD로 장애물을 피하며 달리세요. 방장이 설정한 랩을 가장 먼저 채우면 승리합니다.</p>
+          </li>
+          <li>
+            <b>02 · 방해한다</b>
+            <strong>선두를 쏘고, 밀고, 끌어오기</strong>
+            <p>마우스로 조준해 기본 총과 현재 스킬을 사용하세요. 다른 러너와 합심해 위험한 1등을 막아도 됩니다.</p>
+          </li>
+          <li>
+            <b>03 · 다시 달린다</b>
+            <strong>쓰러져도 체크포인트에서 부활</strong>
+            <p>라이프가 0이 되거나 구덩이에 빠지면 마지막 체크포인트로 돌아갑니다. 그때 기본 총 3발도 다시 채워집니다.</p>
+          </li>
+        </ol>
+
+        <div class="game-guide-details">
+          <section class="game-guide-controls" aria-labelledby="game-guide-controls-title">
+            <h3 id="game-guide-controls-title">조작법</h3>
+            <dl>
+              <div><dt>WASD</dt><dd>이동</dd></div>
+              <div><dt>MOUSE</dt><dd>조준</dd></div>
+              <div><dt>L-CLICK</dt><dd>기본 총 · 최대 3발</dd></div>
+              <div><dt>R-CLICK</dt><dd>현재 스킬 사용</dd></div>
+              <div><dt>ENTER</dt><dd>같은 방 채팅</dd></div>
+            </dl>
+          </section>
+          <section class="game-guide-rules" aria-labelledby="game-guide-rules-title">
+            <h3 id="game-guide-rules-title">꼭 기억하세요</h3>
+            <ul>
+              <li><b>LIFE 5칸</b> · 0이 되면 체크포인트 부활</li>
+              <li><b>스킬 1개</b> · 시작과 체크포인트에서 랜덤 변경</li>
+              <li><b>함정 주의</b> · 구덩이, 점프대, 회전봉과 맵별 장애물</li>
+            </ul>
+          </section>
+        </div>
+
+        <aside class="game-guide-chaos">
+          <b>이 게임의 진짜 재미</b>
+          <p>혼자 잘 달리는 것보다 누구를 견제할지 판단하는 게 중요합니다. 선두를 함께 끌어내리고, 나를 괴롭힌 러너에게 다 같이 복수하고, 마지막 순간에는 동맹도 배신하세요.</p>
+        </aside>
+
+        <button id="game-guide-confirm" class="game-guide-confirm" type="button">이해했어요 · 달리기!</button>
+      </div>
+    </section>
+
     <main id="game-screen" class="game-screen hidden">
       <div class="game-stage">
         <div id="game-frame" class="game-frame">
@@ -247,8 +322,16 @@ const elements = {
   game: getElement<HTMLElement>("#game-screen"),
   titleKeyArt: getElement<HTMLImageElement>("#title-keyart"),
   titleCanvas: getElement<HTMLCanvasElement>("#title-canvas"),
+  titleAudioToggle: getElement<HTMLButtonElement>("#title-audio-toggle"),
+  titleAudioState: getElement<HTMLElement>("#title-audio-state"),
+  titleVolume: getElement<HTMLInputElement>("#title-volume"),
+  titleVolumeValue: getElement<HTMLOutputElement>("#title-volume-value"),
   openJoin: getElement<HTMLButtonElement>("#open-join"),
   openCreate: getElement<HTMLButtonElement>("#open-create"),
+  openGuide: getElement<HTMLButtonElement>("#open-guide"),
+  gameGuide: getElement<HTMLElement>("#game-guide"),
+  gameGuideClose: getElement<HTMLButtonElement>("#game-guide-close"),
+  gameGuideConfirm: getElement<HTMLButtonElement>("#game-guide-confirm"),
   titleStage: getElement<HTMLElement>(".title-stage"),
   titleRoomPanel: getElement<HTMLElement>("#title-room-panel"),
   titlePanelMarker: getElement<HTMLElement>("#title-panel-marker"),
@@ -369,11 +452,28 @@ function setMusicTheme(theme: MusicThemeId) {
 }
 setMusicTheme("lobby");
 
+function syncAudioControls() {
+  const muted = audio.muted;
+  const volumePercent = Math.round(audio.volume * 100);
+  const stateLabel = muted ? "소리 OFF" : "소리 ON";
+  elements.titleAudioState.textContent = stateLabel;
+  elements.titleAudioToggle.setAttribute("aria-pressed", String(muted));
+  elements.titleAudioToggle.setAttribute("aria-label", muted ? "소리 켜기" : "소리 끄기");
+  elements.titleAudioToggle.classList.toggle("muted", muted);
+  elements.titleVolume.value = String(volumePercent);
+  elements.titleVolume.disabled = muted;
+  elements.titleVolume.setAttribute("aria-disabled", String(muted));
+  elements.titleVolumeValue.value = `${volumePercent}%`;
+  elements.audio.textContent = stateLabel;
+  elements.audio.setAttribute("aria-pressed", String(muted));
+}
+
 let gameActive = false;
 let lastFrame = performance.now();
 let titleAnimationStartedAt = performance.now();
 let titleFallbackActive = false;
 let toastTimer: number | undefined;
+let gameGuideReturnFocus: HTMLElement | null = null;
 let checkpointIndex = 0;
 let lap = 0;
 let activePitIndex = -1;
@@ -2203,6 +2303,41 @@ function returnToTitle() {
   elements.title.classList.remove("hidden");
 }
 
+function hasSeenGameGuide() {
+  try {
+    return window.localStorage.getItem(GAME_GUIDE_STORAGE_KEY) === "seen";
+  } catch {
+    return false;
+  }
+}
+
+function rememberGameGuide() {
+  try {
+    window.localStorage.setItem(GAME_GUIDE_STORAGE_KEY, "seen");
+  } catch {
+    // Storage can be unavailable in strict privacy modes; the guide still works for this visit.
+  }
+}
+
+function openGameGuide() {
+  gameGuideReturnFocus = document.activeElement instanceof HTMLElement && document.activeElement !== document.body
+    ? document.activeElement
+    : elements.openJoin;
+  elements.title.inert = true;
+  elements.game.inert = true;
+  elements.gameGuide.classList.remove("hidden");
+  window.setTimeout(() => elements.gameGuideClose.focus(), 0);
+}
+
+function closeGameGuide() {
+  rememberGameGuide();
+  elements.gameGuide.classList.add("hidden");
+  elements.title.inert = false;
+  elements.game.inert = false;
+  gameGuideReturnFocus?.focus();
+  gameGuideReturnFocus = null;
+}
+
 type TitleRoomMode = "join" | "create";
 let titleRoomMode: TitleRoomMode = "join";
 
@@ -2506,6 +2641,30 @@ elements.openCreate.addEventListener("click", () => {
   audio.play("ui");
   openTitleRoomPanel("create");
 });
+elements.openGuide.addEventListener("click", () => {
+  audio.play("ui");
+  openGameGuide();
+});
+elements.gameGuideClose.addEventListener("click", closeGameGuide);
+elements.gameGuideConfirm.addEventListener("click", closeGameGuide);
+elements.gameGuide.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeGameGuide();
+    return;
+  }
+  if (event.key !== "Tab") return;
+  const movingBackward = event.shiftKey;
+  const atFirstControl = document.activeElement === elements.gameGuideClose;
+  const atLastControl = document.activeElement === elements.gameGuideConfirm;
+  if (movingBackward && atFirstControl) {
+    event.preventDefault();
+    elements.gameGuideConfirm.focus();
+  } else if (!movingBackward && atLastControl) {
+    event.preventDefault();
+    elements.gameGuideClose.focus();
+  }
+});
 elements.titleConfirm.addEventListener("click", () => { void startFromTitleRoomPanel(); });
 elements.titlePanelBack.addEventListener("click", closeTitleRoomPanel);
 elements.titleRoomCode.addEventListener("keydown", (event) => { if (event.key === "Enter") void startFromTitleRoomPanel(); });
@@ -2535,12 +2694,18 @@ elements.back.addEventListener("click", returnToTitle);
 elements.fullscreen.addEventListener("click", () => { void toggleFullscreen(); });
 elements.audio.addEventListener("click", () => {
   void audio.toggle().then((muted) => {
-    elements.audio.textContent = muted ? "소리 OFF" : "소리 ON";
-    elements.audio.setAttribute("aria-pressed", String(muted));
+    syncAudioControls();
   });
 });
-elements.audio.textContent = audio.muted ? "소리 OFF" : "소리 ON";
-elements.audio.setAttribute("aria-pressed", String(audio.muted));
+elements.titleAudioToggle.addEventListener("click", () => {
+  void audio.toggle().then(() => syncAudioControls());
+});
+elements.titleVolume.addEventListener("input", () => {
+  const nextVolume = Number(elements.titleVolume.value) / 100;
+  void audio.setVolume(nextVolume).then(() => syncAudioControls());
+});
+elements.titleVolume.addEventListener("change", () => audio.play("ui"));
+syncAudioControls();
 updateMapSelection();
 updateSkillPoolSummary();
 elements.gameChatForm.addEventListener("submit", (event) => {
@@ -2765,5 +2930,8 @@ window.addEventListener("pointerdown", () => { void audio.unlock(); }, { once: t
 if (activeNetworkSession) {
   showToast("이전 멀티플레이 세션에 다시 연결하고 있습니다.");
   socket.connect();
+}
+if (!activeNetworkSession && !hasSeenGameGuide()) {
+  window.setTimeout(openGameGuide, 0);
 }
 requestAnimationFrame(animate);
