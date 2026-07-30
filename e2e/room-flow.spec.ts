@@ -1,6 +1,15 @@
 import { expect, test, type Browser, type Page } from "@playwright/test";
 
+const GAME_GUIDE_STORAGE_KEY = "panic-marathon:game-guide-seen-v1";
+
+async function skipFirstVisitGuide(page: Page) {
+  await page.addInitScript((storageKey) => {
+    window.localStorage.setItem(storageKey, "seen");
+  }, GAME_GUIDE_STORAGE_KEY);
+}
+
 async function createRoom(page: Page, code: string, name: string) {
+  await skipFirstVisitGuide(page);
   await page.goto("/");
   await page.locator("#open-create").click();
   await page.locator("#title-runner-name").fill(name);
@@ -13,6 +22,7 @@ async function createRoom(page: Page, code: string, name: string) {
 }
 
 async function joinRoom(page: Page, code: string, name: string) {
+  await skipFirstVisitGuide(page);
   await page.goto("/");
   await page.locator("#open-join").click();
   await page.locator("#title-runner-name").fill(name);
@@ -32,6 +42,66 @@ async function twoPlayerRoom(browser: Browser, code: string) {
   await expect(guest.locator(".title-waiting-player")).toHaveCount(2);
   return { hostContext, guestContext, host, guest };
 }
+
+test("first visit explains the race and keeps the guide available from the title", async ({ page }) => {
+  await page.goto("/");
+
+  const guide = page.locator("#game-guide");
+  await expect(guide).toBeVisible();
+  await expect(guide).toContainText("가장 먼저 목표 랩을 완주한 단 한 명이 승리");
+  await expect(guide).toContainText("WASD");
+  await expect(guide).toContainText("L-CLICK");
+  await expect(guide).toContainText("체크포인트에서 부활");
+  await expect(page.locator("#game-guide-close")).toBeFocused();
+
+  await page.locator("#game-guide-confirm").click();
+  await expect(guide).toBeHidden();
+  await expect.poll(() => page.evaluate((storageKey) => window.localStorage.getItem(storageKey), GAME_GUIDE_STORAGE_KEY)).toBe("seen");
+
+  await page.reload();
+  await expect(guide).toBeHidden();
+  await page.locator("#open-guide").click();
+  await expect(guide).toBeVisible();
+  await page.locator("#game-guide-close").click();
+  await expect(guide).toBeHidden();
+  await expect(page.locator("#open-guide")).toBeFocused();
+});
+
+test("title sound controls persist volume and stay synchronized with the game toggle", async ({ page }) => {
+  await skipFirstVisitGuide(page);
+  await page.goto("/");
+
+  const volume = page.locator("#title-volume");
+  await expect(page.locator(".title-audio-control")).toBeVisible();
+  await expect(volume).toHaveValue("100");
+  await expect(volume).toBeEnabled();
+  await volume.fill("40");
+  await expect(page.locator("#title-volume-value")).toHaveText("40%");
+  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("panic-marathon:audio-volume:v1"))).toBe("0.4");
+
+  await page.locator("#title-audio-toggle").click();
+  await expect(page.locator("#title-audio-state")).toHaveText("소리 OFF");
+  await expect(page.locator("#title-audio-toggle")).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("#audio-button")).toHaveText("소리 OFF");
+  await expect(volume).toBeDisabled();
+
+  await page.reload();
+  await expect(volume).toHaveValue("40");
+  await expect(page.locator("#title-audio-state")).toHaveText("소리 OFF");
+  await expect(volume).toBeDisabled();
+
+  await page.locator("#title-audio-toggle").click();
+  await expect(page.locator("#title-audio-state")).toHaveText("소리 ON");
+  await expect(page.locator("#audio-button")).toHaveText("소리 ON");
+  await expect(volume).toBeEnabled();
+
+  await volume.fill("0");
+  await expect(page.locator("#title-audio-state")).toHaveText("소리 OFF");
+  await expect(volume).toBeDisabled();
+  await page.locator("#title-audio-toggle").click();
+  await expect(volume).toHaveValue("50");
+  await expect(volume).toBeEnabled();
+});
 
 test("two browsers move from room waiting UI through countdown into the race HUD", async ({ browser }) => {
   const room = await twoPlayerRoom(browser, "PM-E2E-A");
@@ -106,7 +176,17 @@ test("two browsers move from room waiting UI through countdown into the race HUD
 
 test("create room panel shares the join layout and aligns custom map and skill popovers", async ({ page }) => {
   await page.setViewportSize({ width: 544, height: 906 });
+  await skipFirstVisitGuide(page);
   await page.goto("/");
+  const copyright = page.locator(".title-copyright");
+  await expect(copyright).toHaveText("© 2026 eaea7314@gmail.com");
+  const copyrightBox = await copyright.boundingBox();
+  const titleHeadingBox = await page.locator("#title-logo").boundingBox();
+  expect(copyrightBox).not.toBeNull();
+  expect(titleHeadingBox).not.toBeNull();
+  if (copyrightBox && titleHeadingBox) {
+    expect(titleHeadingBox.y - (copyrightBox.y + copyrightBox.height)).toBeGreaterThanOrEqual(36);
+  }
 
   await page.locator("#open-join").click();
   const joinLogoBox = await page.locator(".title-logo").boundingBox();
@@ -217,6 +297,7 @@ test("create room panel shares the join layout and aligns custom map and skill p
 });
 
 test("jump pads rotate their body and arrow into the launch direction", async ({ page }) => {
+  await skipFirstVisitGuide(page);
   await page.goto("/");
   const layouts = await page.evaluate(async (moduleUrl) => {
     const { getJumpPadLayout } = await import(moduleUrl);
@@ -237,6 +318,7 @@ test("jump pads rotate their body and arrow into the launch direction", async ({
 test("room configuration feedback and disconnected runner labels stay clean", async ({ browser }) => {
   const validationContext = await browser.newContext();
   const validationPage = await validationContext.newPage();
+  await skipFirstVisitGuide(validationPage);
   await validationPage.goto("/");
   const inputResult = await validationPage.evaluate(async (moduleUrl) => {
     const { installInputController } = await import(moduleUrl);
