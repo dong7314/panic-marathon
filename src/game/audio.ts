@@ -16,7 +16,9 @@ export type GameSound =
   | "jump"
   | "finish";
 
-const STORAGE_KEY = "panic-marathon:audio-muted:v1";
+const MUTE_STORAGE_KEY = "panic-marathon:audio-muted:v1";
+const VOLUME_STORAGE_KEY = "panic-marathon:audio-volume:v1";
+const MASTER_GAIN = .62;
 const MUSIC_LOOKAHEAD_SECONDS = .75;
 const MUSIC_TRANSITION_SECONDS = .18;
 
@@ -30,12 +32,19 @@ export class GameAudio {
   #musicTheme: MusicThemeId = "lobby";
   #musicSources = new Set<OscillatorNode>();
   #muted: boolean;
+  #volume: number;
 
   constructor() {
     try {
-      this.#muted = window.localStorage.getItem(STORAGE_KEY) === "true";
+      this.#muted = window.localStorage.getItem(MUTE_STORAGE_KEY) === "true";
+      const storedVolumeValue = window.localStorage.getItem(VOLUME_STORAGE_KEY);
+      const storedVolume = storedVolumeValue === null ? Number.NaN : Number(storedVolumeValue);
+      this.#volume = Number.isFinite(storedVolume) && storedVolume >= 0 && storedVolume <= 1
+        ? storedVolume
+        : 1;
     } catch {
       this.#muted = false;
+      this.#volume = 1;
     }
   }
 
@@ -45,6 +54,10 @@ export class GameAudio {
 
   get musicTheme() {
     return this.#musicTheme;
+  }
+
+  get volume() {
+    return this.#volume;
   }
 
   setMusicTheme(theme: MusicThemeId) {
@@ -93,8 +106,10 @@ export class GameAudio {
 
   async toggle() {
     this.#muted = !this.#muted;
+    if (!this.#muted && this.#volume === 0) this.#volume = .5;
     try {
-      window.localStorage.setItem(STORAGE_KEY, String(this.#muted));
+      window.localStorage.setItem(MUTE_STORAGE_KEY, String(this.#muted));
+      window.localStorage.setItem(VOLUME_STORAGE_KEY, String(this.#volume));
     } catch {
       // Audio still toggles for the current page when storage is unavailable.
     }
@@ -102,6 +117,20 @@ export class GameAudio {
     this.#applyMute();
     if (!this.#muted) this.play("ui");
     return this.#muted;
+  }
+
+  async setVolume(volume: number) {
+    this.#volume = Math.max(0, Math.min(1, Number.isFinite(volume) ? volume : 1));
+    this.#muted = this.#volume === 0;
+    try {
+      window.localStorage.setItem(VOLUME_STORAGE_KEY, String(this.#volume));
+      window.localStorage.setItem(MUTE_STORAGE_KEY, String(this.#muted));
+    } catch {
+      // Audio still changes for the current page when storage is unavailable.
+    }
+    await this.unlock();
+    this.#applyMute();
+    return this.#volume;
   }
 
   play(sound: GameSound) {
@@ -145,7 +174,11 @@ export class GameAudio {
 
   #applyMute() {
     if (!this.#context || !this.#master) return;
-    this.#master.gain.setTargetAtTime(this.#muted ? 0 : .62, this.#context.currentTime, .015);
+    this.#master.gain.setTargetAtTime(
+      this.#muted ? 0 : MASTER_GAIN * this.#volume,
+      this.#context.currentTime,
+      .015,
+    );
   }
 
   #tone(
